@@ -1,4 +1,4 @@
-const CONTRACT_NAME = process.env.CONTRACT_NAME ||'near-auth'
+const CONTRACT_NAME = process.env.CONTRACT_NAME || 'auth.name.near'
 
 function getConfig(env) {
   switch (env) {
@@ -18,7 +18,7 @@ function getConfig(env) {
     return {
       networkId: 'testnet',
       nodeUrl: 'https://rpc.testnet.near.org',
-      contractName: CONTRACT_NAME,
+      contractName: "dev-1614243963837-7346924",
       walletUrl: 'https://wallet.testnet.near.org',
       helperUrl: 'https://helper.testnet.near.org',
       explorerUrl: 'https://explorer.testnet.near.org',

@@ -1,17 +1,3 @@
-/*
- * This is an example of a Rust smart contract with two simple, symmetric functions:
- *
- * 1. set_greeting: accepts a greeting, such as "howdy", and records it for the user (account_id)
- *    who sent the request
- * 2. get_greeting: accepts an account_id and returns the greeting saved for it, defaulting to
- *    "Hello"
- *
- * Learn more about writing NEAR smart contracts with Rust:
- * https://github.com/near/near-sdk-rs
- *
- */
-
-// To conserve gas, efficient serialization is achieved through Borsh (http://borsh.io/)
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::wee_alloc;
@@ -24,8 +10,6 @@ const ACCESS_KEY_ALLOWANCE: u128 = 10_000_000_000_000_000_000_000; // 0.01
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
-// Structs in Rust are similar to other languages, and may include impl keyword as shown below
-// Note: the names of the structs are not important when calling the smart contract, but the function names are
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct NearAuth {
@@ -103,8 +87,6 @@ impl NearAuth {
             env::signer_account_pk()
         );
 
-        //env::log(format!("{:?} key deleted", env::signer_account_pk()).as_bytes());
-
         let mut contacts = self.accounts.get(&account_id).unwrap_or(vec![]);
         contacts.push(contact);
         self.accounts.insert(&account_id, &contacts);
@@ -119,19 +101,10 @@ impl NearAuth {
     pub fn get_contacts(&self, account_id: AccountId) -> Vec<Contact> {
         self.accounts.get(&account_id).expect("Contacts not found")
     }
+
+    // TODO add remove contact method
 }
 
-/*
- * The rest of this file holds the inline tests for the code above
- * Learn more about Rust tests: https://doc.rust-lang.org/book/ch11-01-writing-tests.html
- *
- * To run from contract directory:
- * cargo test -- --nocapture
- *
- * From project root, to run in combination with frontend tests:
- * yarn test
- *
- */
 #[cfg(test)]
 mod tests {
     use super::*;
