@@ -55,3 +55,11 @@ ul.accounts div {
     text-decoration: none;
 }
 
+.user-picture{
+    padding-left: 10px;
+}
+
+.user-picture img{
+    border-radius: 5px;
+    margin-top: 5px;
+}

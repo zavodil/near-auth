@@ -1,11 +1,16 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::wee_alloc;
-use near_sdk::{env, near_bindgen, AccountId, Promise};
+use near_sdk::{env, near_bindgen, AccountId, Balance, Promise};
 use near_sdk::json_types::Base58PublicKey;
 use near_sdk::collections::UnorderedMap;
 
-const ACCESS_KEY_ALLOWANCE: u128 = 10_000_000_000_000_000_000_000; // 0.01
+const ACCESS_KEY_ALLOWANCE: u128 = 10_000_000_000_000_000_000_000;
+// 0.01
+const MIN_DEPOSIT_AMOUNT: u128 = 100_000_000_000_000_000_000_000;
+// 0.1
+const MASTER_ACCOUNT_ID: &str = "dev-1614425625888-4173456"; // account to whitelist keys
+// TODO Set master account
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
@@ -15,6 +20,7 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 pub struct NearAuth {
     accounts: UnorderedMap<AccountId, Vec<Contact>>,
     requests: UnorderedMap<AccountId, Contact>,
+    whitelisted_keys: UnorderedMap<AccountId, Base58PublicKey>,
 }
 
 impl Default for NearAuth {
@@ -22,6 +28,7 @@ impl Default for NearAuth {
         Self {
             accounts: UnorderedMap::new(b"e".to_vec()),
             requests: UnorderedMap::new(b"p".to_vec()),
+            whitelisted_keys: UnorderedMap::new(b"k".to_vec()),
         }
     }
 }
@@ -32,25 +39,40 @@ pub enum ContactTypes {
     Email,
     Telegram,
     Twitter,
-    GovForum,
+    Github,
+    NearGovForum,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(crate = "near_sdk::serde")]
 pub struct Contact {
     pub contact_type: ContactTypes,
     pub value: String,
 }
 
+
 #[near_bindgen]
 impl NearAuth {
+    pub fn whitelist_key(&mut self, account_id: AccountId, public_key: Base58PublicKey) {
+        assert!(env::predecessor_account_id() == MASTER_ACCOUNT_ID, "No access");
+        self.whitelisted_keys.insert(&account_id, &public_key);
+    }
+
     #[payable]
     pub fn start_auth(&mut self, public_key: Base58PublicKey, contact: Contact) -> Promise {
         assert!(
             env::attached_deposit() >= ACCESS_KEY_ALLOWANCE,
             "Attached deposit must be greater than ACCESS_KEY_ALLOWANCE"
         );
-        let pk = public_key.into();
+
+        assert!(self.has_whitelisted_key(env::predecessor_account_id()) == true,
+                "Whitelisted key not found");
+
+        assert_eq!(
+            self.get_whitelisted_key(env::predecessor_account_id()).unwrap(),
+            public_key,
+            "Only whitelisted keys are allowed"
+        );
 
         self.requests.insert(
             &env::predecessor_account_id(),
@@ -58,6 +80,10 @@ impl NearAuth {
         );
 
         env::log(format!("@{} add key", env::current_account_id()).as_bytes());
+
+        self.whitelisted_keys.remove(&env::predecessor_account_id());
+
+        let pk = public_key.into();
 
         Promise::new(env::current_account_id()).add_access_key(
             pk,
@@ -94,14 +120,69 @@ impl NearAuth {
         self.requests.remove(&account_id).expect("Unexpected request");
     }
 
-    pub fn get_request(&self, account_id: AccountId) -> Contact {
-        self.requests.get(&account_id).expect("Request not found")
+    pub fn get_request(&self, account_id: AccountId) -> Option<Contact> {
+        match self.requests.get(&account_id) {
+            Some(contact) => Some(contact),
+            None => None
+        }
     }
 
-    pub fn get_contacts(&self, account_id: AccountId) -> Vec<Contact> {
-        self.accounts.get(&account_id).expect("Contacts not found")
+    pub fn get_contacts(&self, account_id: AccountId) -> Option<Vec<Contact>> {
+        match self.accounts.get(&account_id) {
+            Some(contacts) => Some(contacts),
+            None => None
+        }
     }
 
+    pub fn get_whitelisted_key(&self, account_id: AccountId) -> Option<Base58PublicKey> {
+        match self.whitelisted_keys.get(&account_id) {
+            Some(key) => Some(key),
+            None => None
+        }
+    }
+
+    pub fn has_whitelisted_key(&self, account_id: AccountId) -> bool {
+        self.get_whitelisted_key(account_id) != None
+    }
+
+    pub fn remove_whitelisted_key(&mut self) {
+        self.whitelisted_keys.remove(&env::predecessor_account_id());
+    }
+
+
+    #[payable]
+    pub fn send(&mut self, contact: Contact) -> Promise {
+        let tokens: Balance = near_sdk::env::attached_deposit();
+        assert!(tokens >= MIN_DEPOSIT_AMOUNT, "Minimal amount is 0.1 NEAR");
+
+        let owners = self.get_owners(contact);
+        assert!(owners.len() > 0, "Contact not found");
+        assert!(owners.len() == 1, "Illegal contact owners quantity");
+
+        let recipient = owners.get(0).unwrap().to_string();
+        env::log(format!("Tokens sent to @{}", recipient.clone()).as_bytes());
+
+        Promise::new(recipient).transfer(tokens)
+    }
+
+
+    pub fn get_all_contacts(&self, from_index: u64, limit: u64) -> Vec<Contact> {
+        let keys = self.accounts.keys_as_vector();
+
+        (from_index..std::cmp::min(from_index + limit, keys.len()))
+            .flat_map(|index| self.get_contacts(keys.get(index).unwrap()).unwrap())
+            .collect()
+    }
+
+    pub fn get_owners(&self, contact: Contact) -> Vec<String> {
+        let keys = self.accounts.keys_as_vector();
+
+        (0..keys.len())
+            .filter(|index| self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact))
+            .map(|index| keys.get(index).unwrap())
+            .collect()
+    }
+    
     // TODO add remove contact method
 }
 

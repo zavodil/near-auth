@@ -20,7 +20,7 @@ export async function initContract() {
     // View methods are read only. They don't modify the state, but usually return some value.
     viewMethods: ['get_request', 'get_contacts'],
     // Change methods can modify the state. But you don't receive the returned value when called.
-    changeMethods: ['start_auth', 'sign_auth'],
+    changeMethods: ['start_auth', 'sign_auth', 'remove_whitelisted_key'],
   })
 }
 

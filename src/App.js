@@ -1,7 +1,9 @@
 import 'regenerator-runtime/runtime'
 import React from 'react'
+import GitHubLogin from 'react-github-login';
 
 const queryString = require('query-string');
+const md5 = require('md5');
 import {login, logout} from './utils'
 import './global.css'
 import './app.css'
@@ -30,6 +32,8 @@ export default function App() {
     const [warning, setWarning] = React.useState("");
     const [complete, setComplete] = React.useState("");
     const [contacts, setContacts] = React.useState([]);
+    const [userPicture, setUserPicture] = React.useState("");
+    const [whiteListedKeyRemove, setWhiteListedKeyRemove] = React.useState(false)
 
     // when the user has not yet interacted with the form, disable the button
     const [buttonDisabled, setButtonDisabled] = React.useState(true)
@@ -42,21 +46,71 @@ export default function App() {
 
     const Warning = () => {
         return (
-            !warning ? <></> :
+            !warning ? null :
                 <div className="warning" dangerouslySetInnerHTML={{__html: warning}}></div>)
-    }
+    };
 
     const Complete = () => {
         return (
-            !complete ? <></> :
+            !complete ? null :
                 <div className="complete" dangerouslySetInnerHTML={{__html: complete}}></div>)
+    };
+
+    const WhiteListedKeyRemove = () => {
+        return (
+            !whiteListedKeyRemove ? null :
+                <div>
+                    <button
+                        onClick={async event => {
+                            event.preventDefault()
+                            const gas = 300000000000000;
+                            try {
+                                await window.contract.remove_whitelisted_key({}, gas);
+                                setWhiteListedKeyRemove(false);
+                            } catch (e) {
+                                alert(
+                                    'Something went wrong! \n' +
+                                    'Check your browser console for more info.\n' +
+                                    e.toString()
+                                )
+                                throw e
+                            }
+
+                            setShowNotification({method: "call", data: "remove_whitelisted_key"});
+                            setTimeout(() => {
+                                setShowNotification("")
+                            }, 11000)
+                        }}
+                        >
+                        Abort previous auth attempt
+                    </button>
+                </div>
+        )
+    };
+
+    const OnGithubLoginSuccess = (response) => {
+        console.log("OnGithubLoginSuccess");
+        console.log(response);
+    }
+    const OnGithubLoginFailure = (response) => {
+        console.log("OnGithubLoginFailure");
+        console.error(response);
     }
 
+    const LoginGithub = () => {
+        return <GitHubLogin clientId="4fe06f510cf9e8f40028"
+                            redirectUri="https://testnet.auth.nearspace.info/github.php"
+                            scope='user:email'
+                            onSuccess={OnGithubLoginFailure}
+                            onRequest={OnGithubLoginFailure}
+                            onFailure={OnGithubLoginSuccess}/>
+    }
 
     const Header = () => {
         return <div className="nav-container">
             <div className="nav-header">
                 <NearLogo/>
+                <UserPicture/>
                 <div className="nav-item user-name">{window.accountId}</div>
 
                 <div className="nav align-right">
@@ -76,8 +130,8 @@ export default function App() {
             <div className="github">
                 <div className="build-on-near"><a href="https://nearspace.info">BUILD ON NEAR</a></div>
                 <div className="brand">Near {appSettings.appNme} | <a href={appSettings.github}
-                                                                 rel="nofollow"
-                                                                 target="_blank">Open Source</a></div>
+                                                                      rel="nofollow"
+                                                                      target="_blank">Open Source</a></div>
             </div>
             <div className="promo">
                 Made by <a href="https://near.zavodil.ru/" rel="nofollow" target="_blank">Zavodil node</a>
@@ -85,6 +139,11 @@ export default function App() {
         </div>
     };
 
+    const UserPicture = () => {
+        return userPicture ?
+            <div className="user-picture"><img
+                src={"http://www.gravatar.com/avatar/" + md5(userPicture) + ".jpg?s=30"}/></div> : null;
+    }
 
     const NearLogo = () => {
         return <div className="logo-container content-desktop">
@@ -156,7 +215,7 @@ export default function App() {
                                 account_id: window.accountId
                             });
 
-                            if (request.hasOwnProperty("value")) {
+                            if (request && request.hasOwnProperty("value")) {
                                 setComplete("Auth request found. Processing... ");
                                 await fetch("telegram.php", {
                                     method: 'POST',
@@ -191,13 +250,13 @@ export default function App() {
                     } else {
                         GetRequest()
                     }
-                }
-                catch (e) {
+
+                    GetContacts();
+                } catch (e) {
                     console.log(e)
                 }
                 // window.contract is set by initContract in index.js
 
-                GetContacts();
 
             }
         },
@@ -241,15 +300,14 @@ export default function App() {
                 <div>Your contacts:</div>
                 <ul className="accounts">
                     {Object.keys(contacts).map(function (key) {
-                        return <li key={key}>
+                        return <li key={contacts[key].value + "-" + contacts[key].contact_type}>
                             <div className="account">{contacts[key].value}</div>
                             <div className="type">{contacts[key].contact_type}</div>
-                        </li>
+                        </li>;
                     })}
                 </ul>
             </div> :
             null;
-
     }
 
     const GetContacts = async () => {
@@ -258,7 +316,14 @@ export default function App() {
                 account_id: window.accountId
             });
 
-            setContacts(contacts);
+            if (contacts) {
+                Object.keys(contacts).map(function (key) {
+                    if (!userPicture && contacts[key].contact_type === "Email")
+                        setUserPicture(contacts[key].value);
+                });
+
+                setContacts(contacts);
+            }
         } catch (e) {
             console.log(e)
         }
@@ -270,7 +335,8 @@ export default function App() {
                 account_id: window.accountId
             });
 
-            if (request.hasOwnProperty("value")) {
+            if (request && request.hasOwnProperty("value")) {
+                console.log("Request found");
                 const request = JSON.parse(window.localStorage.getItem('request'));
                 if (request.hasOwnProperty("public_key")) {
                     fetch("telegram.php", {
@@ -315,6 +381,7 @@ export default function App() {
 
                 <Warning/>
                 <Complete/>
+                <WhiteListedKeyRemove/>
                 <form onSubmit={async event => {
                     event.preventDefault()
 
@@ -351,9 +418,11 @@ export default function App() {
                         })
                             .then(response => response.json())
                             .then(async data => {
-                                if (!data.status)
+                                if (!data.status) {
                                     setWarning(data.text);
-                                else {
+                                    if (data.value === "already_has_key")
+                                        setWhiteListedKeyRemove(true);
+                                } else {
                                     setWarning("");
                                     data.contact = contact.value;
                                     data.contact_type = contactType.toLowerCase()
@@ -362,8 +431,8 @@ export default function App() {
                                     try {
                                         await window.contract.start_auth({
                                             public_key: data.public_key,
-                                            contact: {contact_type: "Telegram", value: contact.value},
-                                        }, 300000000000000, ConvertToYoctoNear(0.1))
+                                            contact: {contact_type: contactType, value: contact.value},
+                                        }, 300000000000000, ConvertToYoctoNear(0.01))
                                     } catch (e) {
                                         ContractCallAlert();
                                         throw e
@@ -450,6 +519,8 @@ export default function App() {
                         </div>
                     </fieldset>
                 </form>
+
+                <LoginGithub/>
 
                 <Contacts/>
             </main>
