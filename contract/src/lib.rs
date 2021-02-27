@@ -62,7 +62,8 @@ impl NearAuth {
     pub fn start_auth(&mut self, public_key: Base58PublicKey, contact: Contact) -> Promise {
         assert!(
             env::attached_deposit() >= ACCESS_KEY_ALLOWANCE,
-            "Attached deposit must be greater than ACCESS_KEY_ALLOWANCE"
+            "Attached deposit must be greater than {} yNEAR",
+            ACCESS_KEY_ALLOWANCE
         );
 
         assert!(self.has_whitelisted_key(env::predecessor_account_id()) == true,
@@ -79,12 +80,9 @@ impl NearAuth {
             &contact,
         );
 
-        env::log(format!("@{} add key", env::current_account_id()).as_bytes());
-
         self.whitelisted_keys.remove(&env::predecessor_account_id());
 
         let pk = public_key.into();
-
         Promise::new(env::current_account_id()).add_access_key(
             pk,
             ACCESS_KEY_ALLOWANCE,
@@ -104,7 +102,7 @@ impl NearAuth {
             "Auth can come from this account"
         );
 
-        let requested_contact: Contact = self.requests.get(&account_id).unwrap();
+        let requested_contact: Contact = self.get_request(account_id.clone()).unwrap();
 
         assert_eq!(contact.value, requested_contact.value, "Different contact data");
         assert_eq!(contact.contact_type, requested_contact.contact_type, "Different contact data");
@@ -113,7 +111,7 @@ impl NearAuth {
             env::signer_account_pk()
         );
 
-        let mut contacts = self.accounts.get(&account_id).unwrap_or(vec![]);
+        let mut contacts = self.get_contacts(account_id.clone()).unwrap_or(vec![]);
         contacts.push(contact);
         self.accounts.insert(&account_id, &contacts);
 
