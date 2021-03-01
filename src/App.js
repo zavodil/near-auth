@@ -1,6 +1,6 @@
 import 'regenerator-runtime/runtime'
 import React from 'react'
-import GitHubLogin from 'react-github-login';
+import GitHubLogin from './GitHubLogin';
 
 const queryString = require('query-string');
 const md5 = require('md5');
@@ -34,6 +34,8 @@ export default function App() {
     const [contacts, setContacts] = React.useState([]);
     const [userPicture, setUserPicture] = React.useState("");
     const [whiteListedKeyRemove, setWhiteListedKeyRemove] = React.useState(false)
+    const [isInputContactFormAvailable, setIsInputContactFormAvailable] = React.useState(true);
+    const [isGithubLoginAvailable, setIsGithubLoginAvailable] = React.useState(false);
 
     // when the user has not yet interacted with the form, disable the button
     const [buttonDisabled, setButtonDisabled] = React.useState(true)
@@ -61,6 +63,7 @@ export default function App() {
             !whiteListedKeyRemove ? null :
                 <div>
                     <button
+                        className="abort-previous-button"
                         onClick={async event => {
                             event.preventDefault()
                             const gas = 300000000000000;
@@ -81,29 +84,116 @@ export default function App() {
                                 setShowNotification("")
                             }, 11000)
                         }}
-                        >
+                    >
                         Abort previous auth attempt
                     </button>
                 </div>
         )
     };
 
-    const OnGithubLoginSuccess = (response) => {
-        console.log("OnGithubLoginSuccess");
-        console.log(response);
+    function timeout(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function sleep(fn, ...args) {
+        await timeout(3000);
+        return fn(...args);
+    }
+
+    const OnGithubLoginSuccess = async (response) => {
+        let goOn = response && response.hasOwnProperty("code");
+        if (goOn) {
+            setComplete("Github auth request found. Processing... ");
+
+            while (goOn) {
+                var [parents] = await Promise.all([
+                    await fetch("telegram.php", {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            operation: "start",
+                            account_id: window.accountId,
+                            contact: response.code,
+                            contact_type: contactType.toLowerCase(),
+                            network: config.networkId,
+                        }),
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        }
+                    })
+                        .then(response => response.json())
+                        .then(async data => {
+                            if (data.status) {
+                                goOn = false;
+                                setComplete(data.text);
+                                setWarning("");
+
+                                data.contact_type = contactType.toLowerCase()
+                                window.localStorage.setItem('request', data ? JSON.stringify(data) : "[]");
+
+                                try {
+                                    await window.contract.start_auth({
+                                        public_key: data.public_key,
+                                        contact: {contact_type: contactType, value: data.contact},
+                                    }, 300000000000000, ConvertToYoctoNear(0.01))
+                                } catch (e) {
+                                    ContractCallAlert();
+                                    throw e
+                                }
+
+                            } else {
+                                setComplete("");
+                                if (data.value === "already_has_key") {
+                                    goOn = false;
+                                    setWhiteListedKeyRemove(true);
+                                    setWarning(data.text);
+                                }
+                                else {
+                                    setWarning("Auth failed. Please check console for details.");
+                                }
+                            }
+                            window.history.replaceState({}, document.title, "/");
+                        })
+                        .catch(err => console.error("Error:", err)),
+
+                    timeout(500)
+                ]);
+            }
+        }
     }
     const OnGithubLoginFailure = (response) => {
-        console.log("OnGithubLoginFailure");
+        console.log("Github Login Failure");
         console.error(response);
     }
 
+    const InputContactForm = () => {
+        return isInputContactFormAvailable ?
+            <>
+                <input
+                    autoComplete="off"
+                    defaultValue=""
+                    id="contact"
+                    onChange={e => setButtonDisabled(!e.target.value)}
+                    placeholder="Enter account handler"
+                    style={{flex: 1}}
+                />
+                <button
+                    disabled={buttonDisabled}
+                    style={{borderRadius: '0 5px 5px 0'}}
+                >
+                    Send
+                </button>
+            </> :
+            null;
+    };
+
     const LoginGithub = () => {
-        return <GitHubLogin clientId="4fe06f510cf9e8f40028"
-                            redirectUri="https://testnet.auth.nearspace.info/github.php"
-                            scope='user:email'
-                            onSuccess={OnGithubLoginFailure}
-                            onRequest={OnGithubLoginFailure}
-                            onFailure={OnGithubLoginSuccess}/>
+        return isGithubLoginAvailable ? <GitHubLogin clientId="4fe06f510cf9e8f40028"
+                                                     redirectUri="https://testnet.auth.nearspace.info/github.php"
+                                                     scope='user:email'
+                                                     className="github-login-button"
+                                                     onSuccess={OnGithubLoginSuccess}
+                                                     onFailure={OnGithubLoginFailure}/> : null;
     }
 
     const Header = () => {
@@ -203,7 +293,6 @@ export default function App() {
     React.useEffect(
         async () => {
 
-
             // in this case, we only care to query the contract when signed in
             if (window.walletConnection.isSignedIn()) {
                 try {
@@ -291,16 +380,17 @@ export default function App() {
     }
 
     const dropdownOptions = [
-        'Telegram', 'Email'
+        'Telegram', 'Email', 'Github'
     ];
 
     const Contacts = () => {
+        let i = 0;
         return contacts.length ?
             <div className="contacts">
                 <div>Your contacts:</div>
                 <ul className="accounts">
                     {Object.keys(contacts).map(function (key) {
-                        return <li key={contacts[key].value + "-" + contacts[key].contact_type}>
+                        return <li key={contacts[key].value + "-" + i++}>
                             <div className="account">{contacts[key].value}</div>
                             <div className="type">{contacts[key].contact_type}</div>
                         </li>;
@@ -336,6 +426,7 @@ export default function App() {
             });
 
             if (request && request.hasOwnProperty("value")) {
+                setComplete("Auth request found. Processing... ");
                 console.log("Request found");
                 const request = JSON.parse(window.localStorage.getItem('request'));
                 if (request.hasOwnProperty("public_key")) {
@@ -348,7 +439,8 @@ export default function App() {
                             telegram_id: request.value,
                             public_key: request.public_key,
                             account_id: window.accountId,
-                            network: config.networkId
+                            network: config.networkId,
+                            additional_contact: request.additional_contact
                         }),
                         headers: {
                             'Accept': 'application/json',
@@ -359,6 +451,8 @@ export default function App() {
                         .then(data => {
                             if (data.status) {
                                 setComplete(data.text);
+                            } else {
+                                setWarning(data.text);
                             }
                         })
                         .catch(err => console.error("Error:", err));
@@ -368,6 +462,13 @@ export default function App() {
             console.log(e)
         }
     };
+
+    const ChangeContactType = (value) => {
+        setIsInputContactFormAvailable(value !== "Github");
+        setIsGithubLoginAvailable(value === "Github");
+
+        setContactType(value)
+    }
 
     return (
         // use React Fragment, <>, to avoid wrapping elements in unnecessary divs
@@ -382,7 +483,7 @@ export default function App() {
                 <Warning/>
                 <Complete/>
                 <WhiteListedKeyRemove/>
-                <form onSubmit={async event => {
+                <form className="main-form" onSubmit={async event => {
                     event.preventDefault()
 
                     /* генерим ключи на сервере, сразу сохраняем по account_id
@@ -402,67 +503,70 @@ export default function App() {
                     try {
                         // make an update call to the smart contract
 
-                        fetch("telegram.php", {
-                            method: 'POST',
-                            body: JSON.stringify({
-                                operation: "start",
-                                contact: contact.value,
-                                account_id: window.accountId,
-                                contact_type: contactType.toLowerCase(),
-                                network: config.networkId
-                            }),
-                            headers: {
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/json'
-                            }
-                        })
-                            .then(response => response.json())
-                            .then(async data => {
-                                if (!data.status) {
-                                    setWarning(data.text);
-                                    if (data.value === "already_has_key")
-                                        setWhiteListedKeyRemove(true);
-                                } else {
-                                    setWarning("");
-                                    data.contact = contact.value;
-                                    data.contact_type = contactType.toLowerCase()
-                                    window.localStorage.setItem('request', data ? JSON.stringify(data) : "[]");
+                        if (contact && contactType) {
 
-                                    try {
-                                        await window.contract.start_auth({
-                                            public_key: data.public_key,
-                                            contact: {contact_type: contactType, value: contact.value},
-                                        }, 300000000000000, ConvertToYoctoNear(0.01))
-                                    } catch (e) {
-                                        ContractCallAlert();
-                                        throw e
-                                    }
+                            fetch("telegram.php", {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                    operation: "start",
+                                    contact: contact.value,
+                                    account_id: window.accountId,
+                                    contact_type: contactType.toLowerCase(),
+                                    network: config.networkId
+                                }),
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'Content-Type': 'application/json'
+                                }
+                            })
+                                .then(response => response.json())
+                                .then(async data => {
+                                    if (!data.status) {
+                                        setWarning(data.text);
+                                        if (data.value === "already_has_key")
+                                            setWhiteListedKeyRemove(true);
+                                    } else {
+                                        setWarning("");
+                                        data.contact = contact.value;
+                                        data.contact_type = contactType.toLowerCase()
+                                        window.localStorage.setItem('request', data ? JSON.stringify(data) : "[]");
 
-                                    /*
-                                    console.log("3")
-                                    if (!warning)
-                                        fetch("telegram.php", {
-                                            method: 'POST',
-                                            body: JSON.stringify({
-                                                operation: "send",
-                                                telegram_id: data.value,
-                                                key: keypair.secretKey
-                                            }),
-                                            headers: {
-                                                'Accept': 'application/json',
-                                                'Content-Type': 'application/json'
-                                            }
-                                        })
-                                            .then(response => response.json())
-                                            .then(data => {
-                                                if (data.status) {
-                                                    setComplete(data.text);
+                                        try {
+                                            await window.contract.start_auth({
+                                                public_key: data.public_key,
+                                                contact: {contact_type: contactType, value: contact.value},
+                                            }, 300000000000000, ConvertToYoctoNear(0.01))
+                                        } catch (e) {
+                                            ContractCallAlert();
+                                            throw e
+                                        }
+
+                                        /*
+                                        console.log("3")
+                                        if (!warning)
+                                            fetch("telegram.php", {
+                                                method: 'POST',
+                                                body: JSON.stringify({
+                                                    operation: "send",
+                                                    telegram_id: data.value,
+                                                    key: keypair.secretKey
+                                                }),
+                                                headers: {
+                                                    'Accept': 'application/json',
+                                                    'Content-Type': 'application/json'
                                                 }
                                             })
-                                            .catch(err => console.error("Error:", err));
-                                    */
-                                }
-                            });
+                                                .then(response => response.json())
+                                                .then(data => {
+                                                    if (data.status) {
+                                                        setComplete(data.text);
+                                                    }
+                                                })
+                                                .catch(err => console.error("Error:", err));
+                                        */
+                                    }
+                                });
+                        }
                     } catch (e) {
                         ContractCallAlert();
                         throw e
@@ -498,29 +602,16 @@ export default function App() {
 
                             <Dropdown
                                 options={dropdownOptions}
-                                onChange={e => setContactType(e.value)}
+                                onChange={e => ChangeContactType(e.value)}
                                 value={dropdownOptions[0]}
                                 placeholder="Select an option"/>
 
-                            <input
-                                autoComplete="off"
-                                defaultValue=""
-                                id="contact"
-                                onChange={e => setButtonDisabled(!e.target.value)}
-                                placeholder="Enter account handler"
-                                style={{flex: 1}}
-                            />
-                            <button
-                                disabled={buttonDisabled}
-                                style={{borderRadius: '0 5px 5px 0'}}
-                            >
-                                Send
-                            </button>
+                            <InputContactForm/>
+                            <LoginGithub/>
+
                         </div>
                     </fieldset>
                 </form>
-
-                <LoginGithub/>
 
                 <Contacts/>
             </main>

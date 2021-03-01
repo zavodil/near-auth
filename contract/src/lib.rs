@@ -91,11 +91,7 @@ impl NearAuth {
         )
     }
 
-    pub fn confirm_auth(
-        &mut self,
-        account_id: AccountId,
-        contact: Contact,
-    ) {
+    pub fn confirm_auth(&mut self, account_id: AccountId, contact: Contact) {
         assert_eq!(
             env::predecessor_account_id(),
             env::current_account_id(),
@@ -180,7 +176,7 @@ impl NearAuth {
             .map(|index| keys.get(index).unwrap())
             .collect()
     }
-    
+
     // TODO add remove contact method
 }
 
