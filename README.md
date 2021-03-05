@@ -1,3 +1,5 @@
+Testnet demo: https://testnet.auth.nearspace.info/
+
 near-auth
 ==================
 
