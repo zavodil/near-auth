@@ -4,6 +4,7 @@ use near_sdk::wee_alloc;
 use near_sdk::{env, near_bindgen, AccountId, Balance, Promise};
 use near_sdk::json_types::Base58PublicKey;
 use near_sdk::collections::UnorderedMap;
+use std::collections::HashMap;
 
 const ACCESS_KEY_ALLOWANCE: u128 = 10_000_000_000_000_000_000_000;
 // 0.01
@@ -128,6 +129,22 @@ impl NearAuth {
         }
     }
 
+    pub fn get_contacts_by_type(&self, account_id: AccountId, contact_type: ContactTypes) -> Option<Vec<String>> {
+        match self.accounts.get(&account_id) {
+            Some(contacts) =>
+                {
+                    let filtered_contacts: Vec<String> = contacts
+                        .into_iter()
+                        .filter(|contact| contact.contact_type == contact_type)
+                        .map(|contact| contact.value)
+                        .collect();
+                    Some(filtered_contacts)
+                }
+            None => None
+        }
+    }
+
+
     pub fn get_whitelisted_key(&self, account_id: AccountId) -> Option<Base58PublicKey> {
         match self.whitelisted_keys.get(&account_id) {
             Some(key) => Some(key),
@@ -160,11 +177,33 @@ impl NearAuth {
     }
 
 
-    pub fn get_all_contacts(&self, from_index: u64, limit: u64) -> Vec<Contact> {
+    pub fn get_all_contacts(&self, from_index: u64, limit: u64) -> HashMap<AccountId, Vec<Contact>> {
+        assert!(limit <= 100, "Abort. Limit > 100");
+
         let keys = self.accounts.keys_as_vector();
 
         (from_index..std::cmp::min(from_index + limit, keys.len()))
-            .flat_map(|index| self.get_contacts(keys.get(index).unwrap()).unwrap())
+            .map(|index| {
+                let account_id = keys.get(index).unwrap();
+                let all_contacts = self.get_contacts(account_id.clone()).unwrap();
+                (account_id, all_contacts)
+            })
+            .collect()
+    }
+
+    pub fn get_all_contacts_by_type(&self, contact_type: ContactTypes, from_index: u64, limit: u64) -> HashMap<AccountId, Vec<String>> {
+        assert!(limit <= 100, "Abort. Limit > 100");
+
+        let keys = self.accounts.keys_as_vector();
+
+        (from_index..std::cmp::min(from_index + limit, keys.len()))
+            .map(|index| {
+                let account_id = keys.get(index).unwrap();
+                let all_contacts = self.get_contacts_by_type(account_id.clone(), contact_type.clone()).unwrap();
+                (account_id, all_contacts)
+            })
+            .filter(|(_k, v)| v.len() > 0)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
 

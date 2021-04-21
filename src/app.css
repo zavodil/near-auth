@@ -63,3 +63,15 @@ ul.accounts div {
     border-radius: 5px;
     margin-top: 5px;
 }
+
+.main-form{
+    padding-top: 10px;
+}
+
+.github-login-button{
+    margin-left: 10px;
+}
+
+.abort-previous-button{
+    margin-bottom: 10px;
+}

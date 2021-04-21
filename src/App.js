@@ -49,13 +49,13 @@ export default function App() {
     const Warning = () => {
         return (
             !warning ? null :
-                <div className="warning" dangerouslySetInnerHTML={{__html: warning}}></div>)
+                <div className="warning" dangerouslySetInnerHTML={{__html: warning}}/>)
     };
 
     const Complete = () => {
         return (
             !complete ? null :
-                <div className="complete" dangerouslySetInnerHTML={{__html: complete}}></div>)
+                <div className="complete" dangerouslySetInnerHTML={{__html: complete}}/>)
     };
 
     const WhiteListedKeyRemove = () => {
@@ -296,6 +296,8 @@ export default function App() {
             // in this case, we only care to query the contract when signed in
             if (window.walletConnection.isSignedIn()) {
                 try {
+                    let requestRound = false;
+
                     if (location.search) {
                         const query = JSON.parse(JSON.stringify(queryString.parse(location.search)));
                         if (query && query.hasOwnProperty("key") && query.hasOwnProperty("contact") && query.hasOwnProperty("type")) {
@@ -332,15 +334,16 @@ export default function App() {
                                             console.log(data.text);
                                         }
                                         window.history.replaceState({}, document.title, "/");
+                                        requestRound = true;
                                     })
                                     .catch(err => console.error("Error:", err));
                             }
                         }
-                    } else {
-                        GetRequest()
                     }
+                    if(!requestRound)
+                        await GetRequest();
 
-                    GetContacts();
+                    await GetContacts();
                 } catch (e) {
                     console.log(e)
                 }
