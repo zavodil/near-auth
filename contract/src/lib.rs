@@ -67,6 +67,8 @@ impl NearAuth {
             ACCESS_KEY_ALLOWANCE
         );
 
+        // check if contact exists
+
         assert!(self.has_whitelisted_key(env::predecessor_account_id()) == true,
                 "Whitelisted key not found");
 
@@ -75,6 +77,7 @@ impl NearAuth {
             public_key,
             "Only whitelisted keys are allowed"
         );
+
 
         self.requests.insert(
             &env::predecessor_account_id(),
@@ -167,7 +170,7 @@ impl NearAuth {
         assert!(tokens >= MIN_DEPOSIT_AMOUNT, "Minimal amount is 0.1 NEAR");
 
         let owners = self.get_owners(contact);
-        assert!(owners.len() > 0, "Contact not found");
+        assert!(owners.len() > 0, "Contact not found"); // TODO Send Tip
         assert!(owners.len() == 1, "Illegal contact owners quantity");
 
         let recipient = owners.get(0).unwrap().to_string();

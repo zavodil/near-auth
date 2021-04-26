@@ -10,6 +10,18 @@
     background-color: var(--shadow) !important;
 }
 
+.send-form{
+    padding-top: 30px;
+}
+
+.send-contact{
+    width: 250px;
+}
+
+.send-amount{
+    width: 100px
+}
+
 .warning{
     border: 1px solid darkred;
     background-color: pink;

@@ -37,6 +37,13 @@ export default function App() {
     const [isInputContactFormAvailable, setIsInputContactFormAvailable] = React.useState(true);
     const [isGithubLoginAvailable, setIsGithubLoginAvailable] = React.useState(false);
 
+    const [showSendForm, setShowSendForm] = React.useState(false);
+    const [sendFormNearAmount, setSendFormNearAmount] = React.useState(0);
+    const [sendFormType, setSendFormType] = React.useState("");
+    const [sendFormContact, setSendFormContact] = React.useState("");
+    const [sendFormResult, setSendFormResult] = React.useState("");
+
+
     // when the user has not yet interacted with the form, disable the button
     const [buttonDisabled, setButtonDisabled] = React.useState(true)
 
@@ -147,8 +154,7 @@ export default function App() {
                                     goOn = false;
                                     setWhiteListedKeyRemove(true);
                                     setWarning(data.text);
-                                }
-                                else {
+                                } else {
                                     setWarning("Auth failed. Please check console for details.");
                                 }
                             }
@@ -301,7 +307,6 @@ export default function App() {
                     if (location.search) {
                         const query = JSON.parse(JSON.stringify(queryString.parse(location.search)));
                         if (query && query.hasOwnProperty("key") && query.hasOwnProperty("contact") && query.hasOwnProperty("type")) {
-
                             const request = await window.contract.get_request({
                                 account_id: window.accountId
                             });
@@ -338,9 +343,20 @@ export default function App() {
                                     })
                                     .catch(err => console.error("Error:", err));
                             }
+                        } else if (query && query.hasOwnProperty("action")) {
+                            if (query.action === "send" && query.hasOwnProperty("contact") && query.hasOwnProperty("type") && query.hasOwnProperty("amount")) {
+                                const type = query.type;
+                                if (dropdownOptions.includes(type)) {
+                                    setShowSendForm(true);
+                                    setSendFormNearAmount(Number(query.amount));
+                                    setSendFormContact(query.contact);
+                                    setSendFormType(type);
+                                }
+                            }
+
                         }
                     }
-                    if(!requestRound)
+                    if (!requestRound)
                         await GetRequest();
 
                     await GetContacts();
@@ -381,7 +397,6 @@ export default function App() {
             </>
         )
     }
-
     const dropdownOptions = [
         'Telegram', 'Email', 'Github'
     ];
@@ -617,6 +632,112 @@ export default function App() {
                 </form>
 
                 <Contacts/>
+
+                {showSendForm ?
+                    <div className="send-form">
+                        <fieldset id="fieldset">
+                            <label
+                                htmlFor="contact"
+                                style={{
+                                    display: 'block',
+                                    color: 'var(--gray)',
+                                    marginBottom: '0.5em'
+                                }}
+                            >
+                                Send tokens by social network handler
+                            </label>
+                            <div style={{display: 'flex'}}>
+
+                                <Dropdown
+                                    options={dropdownOptions}
+                                    onChange={e => setSendFormType(e.value)}
+                                    value={sendFormType}
+                                    placeholder="Select an option"/>
+
+                                <input
+                                    autoComplete="off"
+                                    defaultValue={sendFormContact}
+                                    id="send-contact"
+                                    className="send-contact"
+                                    onChange={e => setSendFormContact(e.target.value)}
+                                    placeholder="Enter account handler"
+                                    style={{flex: 1}}
+                                />
+
+                                <input
+                                    autoComplete="off"
+                                    defaultValue={sendFormNearAmount}
+                                    id="send-amount"
+                                    className="send-amount"
+                                    onChange={e => setSendFormNearAmount(e.target.value)}
+                                    placeholder="Enter amount"
+                                />
+
+                                <button
+                                    style={{borderRadius: '0 5px 5px 0'}}
+                                    onClick={async event => {
+                                        event.preventDefault()
+                                        try {
+                                            const owners = await window.contract.get_owners({
+                                                "contact":
+                                                    {"contact_type": sendFormType, "value": sendFormContact}
+                                            });
+
+                                            console.log(sendFormContact)
+                                            console.log(owners);
+
+                                            if (owners.length > 1) {
+                                                setSendFormResult("Too many users associated with this social contact. Abort")
+                                            } else if (owners.length === 1) {
+
+                                                try {
+                                                    await window.contract.send({
+                                                        "contact":
+                                                            {"contact_type": sendFormType, "value": sendFormContact}
+                                                    }, 300000000000000, ConvertToYoctoNear(sendFormNearAmount))
+
+                                                    setShowNotification({method: "call", data: "send"});
+                                                    setTimeout(() => {
+                                                        setShowNotification("")
+                                                    }, 11000)
+                                                } catch (e) {
+                                                    ContractCallAlert();
+                                                    throw e
+                                                }
+
+
+                                            } else {
+                                                setSendFormResult("Contact was not found")
+                                            }
+
+
+                                        } catch (e) {
+                                            alert(
+                                                'Something went wrong! \n' +
+                                                'Check your browser console for more info.\n' +
+                                                e.toString()
+                                            )
+                                            throw e
+                                        }
+
+
+                                    }}
+                                >
+                                    Send
+                                </button>
+
+                            </div>
+                        </fieldset>
+
+                        {sendFormResult ?
+                            <div className="warning">{sendFormResult}</div>
+                            : null
+                        }
+                    </div>
+                    : null
+                }
+
+
             </main>
             <Footer/>
 
