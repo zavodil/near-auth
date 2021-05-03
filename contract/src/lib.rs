@@ -44,7 +44,7 @@ pub enum ContactTypes {
     NearGovForum,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(crate = "near_sdk::serde")]
 pub struct Contact {
     pub contact_type: ContactTypes,
@@ -219,7 +219,45 @@ impl NearAuth {
             .collect()
     }
 
-    // TODO add remove contact method
+    pub fn is_owner(&self, account_id: AccountId, contact: Contact) -> bool {
+        match self.accounts.get(&account_id) {
+            Some(contacts) =>
+                {
+                    let filtered_contacts: Vec<Contact> = contacts
+                        .into_iter()
+                        .filter(|_contact| _contact.contact_type == contact.contact_type && _contact.value == contact.value)
+                        // todo shorten
+                        .collect();
+                    filtered_contacts.len() == 1
+                }
+            None => false
+        }
+    }
+
+    pub fn remove(&mut self, contact: Contact) -> bool {
+        let account_id = env::predecessor_account_id();
+        let is_owner = NearAuth::is_owner(self, account_id.clone(), contact.clone());
+
+        assert!(is_owner, "Not an owner of this contact");
+
+        match self.accounts.get(&account_id) {
+            Some(contacts) =>
+                {
+                    let filtered_contacts: Vec<Contact> = contacts
+                        .into_iter()
+                        .filter(|_contact| _contact.contact_type != contact.contact_type && _contact.value != contact.value)
+                        .collect();
+                    self.accounts.insert(&account_id, &filtered_contacts);
+                    true
+                }
+            None => false
+        }
+    }
+
+    pub fn remove_all(&mut self) {
+        let account_id = env::predecessor_account_id();
+        self.accounts.insert(&account_id, &vec![]);
+    }
 }
 
 #[cfg(test)]
