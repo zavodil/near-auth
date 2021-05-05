@@ -87,3 +87,7 @@ ul.accounts div {
 .abort-previous-button{
     margin-bottom: 10px;
 }
+
+.user-balance{
+    cursor: pointer;
+}

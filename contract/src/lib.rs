@@ -11,8 +11,7 @@ use std::collections::HashMap;
 /// It's 10 times lower than the genesis price.
 pub const STORAGE_PRICE_PER_BYTE: Balance = 10_000_000_000_000_000_000;
 
-const MIN_DEPOSIT_AMOUNT: u128 = 100_000_000_000_000_000_000_000;
-//0.1
+const MIN_SEND_AMOUNT: u128 = 100_000_000_00_000_000_000_000; //0.01
 const STORAGE_COST_PER_KEY: u128 = 1000 * STORAGE_PRICE_PER_BYTE; //0.01
 
 #[global_allocator]
@@ -23,10 +22,8 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 pub struct Contract {
     master_account_id: AccountId,
     accounts: UnorderedMap<AccountId, Vec<Contact>>,
-
     requests: UnorderedMap<Base58PublicKey, Request>,
-
-    pub storage_deposits: LookupMap<AccountId, Balance>,
+    storage_deposits: LookupMap<AccountId, Balance>,
 }
 
 /// Helper structure to for keys of the persistent collections.
@@ -270,11 +267,11 @@ impl Contract {
     #[payable]
     pub fn send(&mut self, contact: Contact) -> Promise {
         let tokens: Balance = near_sdk::env::attached_deposit();
-        assert!(tokens >= MIN_DEPOSIT_AMOUNT, "Minimal amount is 0.1 NEAR");
+        assert!(tokens >= MIN_SEND_AMOUNT, "Minimal amount is 0.01 NEAR");
 
         let owners = self.get_owners(contact);
         let owners_quantity = owners.len();
-        assert!(owners_quantity > 0, "Contact not found"); // TODO Send Tip
+        assert!(owners_quantity > 0, "Contact not found");
         assert!(owners_quantity == 1, "Illegal contact owners quantity");
 
         let recipient = owners.get(0).unwrap().to_string();
@@ -323,7 +320,7 @@ impl Contract {
             .collect()
     }
 
-    pub fn is_owner(&self, account_id: AccountId, contact: Contact) -> bool {
+        pub fn is_owner(&self, account_id: AccountId, contact: Contact) -> bool {
         match self.accounts.get(&account_id) {
             Some(contacts) =>
                 {

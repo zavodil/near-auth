@@ -21,6 +21,7 @@ const config = getConfig(process.env.NODE_ENV || 'development');
 const appSettings = getAppSettings();
 
 const FRAC_DIGITS = 5;
+const MIN_STORAGE_DEPOSIT = 0.011;
 
 function ConvertToYoctoNear(amount) {
     return new BN(Math.round(amount * 100000000)).mul(new BN("10000000000000000")).toString();
@@ -42,6 +43,10 @@ export default function App() {
     const [sendFormType, setSendFormType] = React.useState("");
     const [sendFormContact, setSendFormContact] = React.useState("");
     const [sendFormResult, setSendFormResult] = React.useState("");
+
+    const [showStorageDeposit, setShowStorageDeposit] = React.useState(false);
+    const [storagePaid, setStoragePaid] = React.useState(0);
+    const [inputStorageDeposit, setInputStorageDeposit] = React.useState(MIN_STORAGE_DEPOSIT);
 
 
     // when the user has not yet interacted with the form, disable the button
@@ -75,7 +80,7 @@ export default function App() {
                             event.preventDefault()
                             const gas = 300000000000000;
                             try {
-                                await window.contract.remove_whitelisted_key({}, gas);
+                                await window.contract.remove_request({}, gas);
                                 setWhiteListedKeyRemove(false);
                             } catch (e) {
                                 alert(
@@ -86,7 +91,7 @@ export default function App() {
                                 throw e
                             }
 
-                            setShowNotification({method: "call", data: "remove_whitelisted_key"});
+                            setShowNotification({method: "call", data: "remove_request"});
                             setTimeout(() => {
                                 setShowNotification("")
                             }, 11000)
@@ -120,7 +125,7 @@ export default function App() {
                             operation: "start",
                             account_id: window.accountId,
                             contact: response.code,
-                            contact_type: contactType.toLowerCase(),
+                            contact_type: contactType,
                             network: config.networkId,
                         }),
                         headers: {
@@ -135,14 +140,14 @@ export default function App() {
                                 setComplete(data.text);
                                 setWarning("");
 
-                                data.contact_type = contactType.toLowerCase()
+                                data.category = contactType.toLowerCase()
                                 window.localStorage.setItem('request', data ? JSON.stringify(data) : "[]");
 
                                 try {
                                     await window.contract.start_auth({
                                         public_key: data.public_key,
-                                        contact: {contact_type: contactType, value: data.contact},
-                                    }, 300000000000000, ConvertToYoctoNear(0.01))
+                                        contact: {category: contactType, value: data.contact},
+                                    }, 300000000000000, 1)
                                 } catch (e) {
                                     ContractCallAlert();
                                     throw e
@@ -153,6 +158,9 @@ export default function App() {
                                 if (data.value === "already_has_key") {
                                     goOn = false;
                                     setWhiteListedKeyRemove(true);
+                                    setWarning(data.text);
+                                } else if (data.value === "contact_already_exists") {
+                                    goOn = false;
                                     setWarning(data.text);
                                 } else {
                                     setWarning("Auth failed. Please check console for details.");
@@ -172,27 +180,6 @@ export default function App() {
         console.error(response);
     }
 
-    const InputContactForm = () => {
-        return isInputContactFormAvailable ?
-            <>
-                <input
-                    autoComplete="off"
-                    defaultValue=""
-                    id="contact"
-                    onChange={e => setButtonDisabled(!e.target.value)}
-                    placeholder="Enter account handler"
-                    style={{flex: 1}}
-                />
-                <button
-                    disabled={buttonDisabled}
-                    style={{borderRadius: '0 5px 5px 0'}}
-                >
-                    Send
-                </button>
-            </> :
-            null;
-    };
-
     const LoginGithub = () => {
         return isGithubLoginAvailable ? <GitHubLogin clientId="4fe06f510cf9e8f40028"
                                                      redirectUri="https://testnet.auth.nearspace.info/github.php"
@@ -202,13 +189,22 @@ export default function App() {
                                                      onFailure={OnGithubLoginFailure}/> : null;
     }
 
+    const StoragePaid = () => {
+        return <div className="nav user-balance" data-tip="Your Near Auth Storage"
+                    onClick={async event => {
+                        setShowStorageDeposit(true)
+                    }}>
+            {`Storage: ${storagePaid} Ⓝ`}
+        </div>;
+    };
+
     const Header = () => {
         return <div className="nav-container">
             <div className="nav-header">
                 <NearLogo/>
                 <UserPicture/>
                 <div className="nav-item user-name">{window.accountId}</div>
-
+                <StoragePaid/>
                 <div className="nav align-right">
                     <NavMenu/>
                     <div className="account-sign-out">
@@ -296,22 +292,37 @@ export default function App() {
         );
     };
 
+    const GetStoragePaid = async () => {
+        const storagePaid = await window.contract.storage_paid({
+            account_id: window.accountId
+        });
+        const storagePaidFormatted = storagePaid && Number(storagePaid)
+            ? nearAPI.utils.format.formatNearAmount(storagePaid, FRAC_DIGITS).replace(",", "")
+            : "0";
+        setStoragePaid(storagePaidFormatted);
+        return storagePaidFormatted;
+    };
+
     React.useEffect(
         async () => {
 
             // in this case, we only care to query the contract when signed in
             if (window.walletConnection.isSignedIn()) {
+                await GetStoragePaid().then((storagePaidFormatted) => {
+                    console.log(storagePaidFormatted);
+                });
+
                 try {
                     let requestRound = false;
 
                     if (location.search) {
                         const query = JSON.parse(JSON.stringify(queryString.parse(location.search)));
                         if (query && query.hasOwnProperty("key") && query.hasOwnProperty("contact") && query.hasOwnProperty("type")) {
-                            const request = await window.contract.get_request({
+                            const requested_public_key = await window.contract.get_requested_public_key({
                                 account_id: window.accountId
                             });
 
-                            if (request && request.hasOwnProperty("value")) {
+                            if (requested_public_key) {
                                 setComplete("Auth request found. Processing... ");
                                 await fetch("telegram.php", {
                                     method: 'POST',
@@ -333,6 +344,7 @@ export default function App() {
                                         if (data.status) {
                                             setComplete(data.text);
                                             setWarning("");
+                                            GetStoragePaid();
                                         } else {
                                             setComplete("");
                                             setWarning("Auth failed. Please check console for details.");
@@ -346,11 +358,13 @@ export default function App() {
                         } else if (query && query.hasOwnProperty("action")) {
                             if (query.action === "send" && query.hasOwnProperty("contact") && query.hasOwnProperty("type") && query.hasOwnProperty("amount")) {
                                 const type = query.type;
+                                console.log(query);
+                                console.log(Number(query.amount));
                                 if (dropdownOptions.includes(type)) {
                                     setShowSendForm(true);
-                                    setSendFormNearAmount(Number(query.amount));
                                     setSendFormContact(query.contact);
                                     setSendFormType(type);
+                                    setSendFormNearAmount(Number(query.amount));
                                 }
                             }
 
@@ -410,7 +424,7 @@ export default function App() {
                     {Object.keys(contacts).map(function (key) {
                         return <li key={contacts[key].value + "-" + i++}>
                             <div className="account">{contacts[key].value}</div>
-                            <div className="type">{contacts[key].contact_type}</div>
+                            <div className="type">{contacts[key].category}</div>
                         </li>;
                     })}
                 </ul>
@@ -426,7 +440,7 @@ export default function App() {
 
             if (contacts) {
                 Object.keys(contacts).map(function (key) {
-                    if (!userPicture && contacts[key].contact_type === "Email")
+                    if (!userPicture && contacts[key].category === "Email")
                         setUserPicture(contacts[key].value);
                 });
 
@@ -439,41 +453,49 @@ export default function App() {
 
     const GetRequest = async () => {
         try {
-            const request = await window.contract.get_request({
+            const requested_public_key = await window.contract.get_requested_public_key({
                 account_id: window.accountId
             });
 
-            if (request && request.hasOwnProperty("value")) {
-                setComplete("Auth request found. Processing... ");
-                console.log("Request found");
-                const request = JSON.parse(window.localStorage.getItem('request'));
-                if (request.hasOwnProperty("public_key")) {
-                    fetch("telegram.php", {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            operation: "send",
-                            contact: request.contact,
-                            contact_type: request.contact_type,
-                            telegram_id: request.value,
-                            public_key: request.public_key,
-                            account_id: window.accountId,
-                            network: config.networkId,
-                            additional_contact: request.additional_contact
-                        }),
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        }
-                    })
-                        .then(response => response.json())
-                        .then(data => {
-                            if (data.status) {
-                                setComplete(data.text);
-                            } else {
-                                setWarning(data.text);
+            if (requested_public_key) {
+                const request = await window.contract.get_request({
+                    public_key: requested_public_key
+                });
+
+                if (request && request.contact && request.contact.value) {
+                    setComplete("Auth request found. Processing... ");
+                    console.log("Request found");
+                    const request = JSON.parse(window.localStorage.getItem('request'));
+                    if (request.hasOwnProperty("public_key")) {
+                        fetch("telegram.php", {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                operation: "send",
+                                contact: request.contact,
+                                contact_type: request.category || request.contact_type,
+                                telegram_id: request.value,
+                                public_key: request.public_key,
+                                account_id: window.accountId,
+                                network: config.networkId,
+                                additional_contact: request.additional_contact
+                            }),
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
                             }
                         })
-                        .catch(err => console.error("Error:", err));
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.status) {
+                                    setComplete(data.text);
+                                    setWarning("");
+                                } else {
+                                    setWarning(data.text);
+                                    setComplete("");
+                                }
+                            })
+                            .catch(err => console.error("Error:", err));
+                    }
                 }
             }
         } catch (e) {
@@ -501,9 +523,86 @@ export default function App() {
                 <Warning/>
                 <Complete/>
                 <WhiteListedKeyRemove/>
+
+
+                {(showStorageDeposit || storagePaid < MIN_STORAGE_DEPOSIT) &&
+                <div style={{paddingBottom: "20px"}}>
+                    <fieldset id="fieldset-storage-deposit">
+                        <label
+                            htmlFor="storage-deposit"
+                            style={{
+                                display: 'block',
+                                color: 'var(--gray)',
+                                marginBottom: '0.5em'
+                            }}
+                        >
+                            {storagePaid < MIN_STORAGE_DEPOSIT
+                                ? "Storage deposit needed"
+                                : "Storage Deposit"
+                            }
+                            :
+                        </label>
+                        <div style={{display: 'flex', paddingBottom: "15px"}}>
+
+                            <input
+                                autoComplete="off"
+                                defaultValue="0.011"
+                                id="storage-deposit"
+                                onChange={e => setInputStorageDeposit(e.target.value)}
+                                placeholder="Enter amount"
+                                style={{flex: 1}}
+                            />
+                            <button
+                                style={{borderRadius: '0 5px 5px 0'}}
+                                onClick={async event => {
+                                    event.preventDefault()
+                                    try {
+                                        await window.contract.storage_deposit({},
+                                            100000000000000, ConvertToYoctoNear(inputStorageDeposit)).then(() => GetStoragePaid());
+
+                                    } catch (e) {
+                                        alert(
+                                            'Something went wrong! \n' +
+                                            'Check your browser console for more info.\n' +
+                                            e.toString()
+                                        )
+                                        throw e
+                                    }
+
+
+                                }}
+                            >
+                                Deposit
+                            </button>
+                        </div>
+                        {storagePaid > 0 &&
+                        <button
+                            style={{borderRadius: '5px'}}
+                            onClick={async event => {
+                                event.preventDefault()
+                                try {
+                                    await window.contract.storage_withdraw({},
+                                        100000000000000, 1).then(() => GetStoragePaid());
+
+                                } catch (e) {
+                                    alert(
+                                        'Something went wrong! \n' +
+                                        'Check your browser console for more info.\n' +
+                                        e.toString()
+                                    )
+                                    throw e
+                                }
+                            }}
+                        >
+                            Withdraw {storagePaid} from storage
+                        </button>
+                        }
+                    </fieldset>
+                </div>
+                }
+
                 <form className="main-form" onSubmit={async event => {
                     event.preventDefault()
-
                     /* генерим ключи на сервере, сразу сохраняем по account_id
                     когда есть реквест, проверяем ключ из базы, отправляем
                     когда подписываем, удаляем ключ из базы
@@ -511,25 +610,30 @@ export default function App() {
 
                     // get elements from the form using their id attribute
                     const {fieldset, contact} = event.target.elements
+                    fieldset.disabled = true;
+                    setButtonDisabled(true);
 
-                    // hold onto new user-entered value from React's SynthenticEvent for use after `await` call
-                    //const newGreeting = greeting.value
 
-                    // disable the form while the value gets updated on-chain
-                    fieldset.disabled = true
+                    const has_requested_public_key = await window.contract.has_requested_public_key({
+                        account_id: window.accountId
+                    });
+
+                    if (has_requested_public_key) {
+                        setWarning("Previous auth attempt was not finished. Please abort previous attempt first.");
+                        setWhiteListedKeyRemove(true);
+                        return;
+                    }
 
                     try {
-                        // make an update call to the smart contract
-
                         if (contact && contactType) {
 
-                            fetch("telegram.php", {
+                            await fetch("telegram.php", {
                                 method: 'POST',
                                 body: JSON.stringify({
                                     operation: "start",
                                     contact: contact.value,
                                     account_id: window.accountId,
-                                    contact_type: contactType.toLowerCase(),
+                                    contact_type: contactType,
                                     network: config.networkId
                                 }),
                                 headers: {
@@ -539,6 +643,7 @@ export default function App() {
                             })
                                 .then(response => response.json())
                                 .then(async data => {
+                                    console.log(data);
                                     if (!data.status) {
                                         setWarning(data.text);
                                         if (data.value === "already_has_key")
@@ -552,8 +657,8 @@ export default function App() {
                                         try {
                                             await window.contract.start_auth({
                                                 public_key: data.public_key,
-                                                contact: {contact_type: contactType, value: contact.value},
-                                            }, 300000000000000, ConvertToYoctoNear(0.01))
+                                                contact: {category: contactType, value: contact.value},
+                                            }, 300000000000000, 1)
                                         } catch (e) {
                                             ContractCallAlert();
                                             throw e
@@ -590,7 +695,8 @@ export default function App() {
                         throw e
                     } finally {
                         // re-enable the form, whether the call succeeded or failed
-                        fieldset.disabled = false
+                        fieldset.disabled = false;
+                        setButtonDisabled(false);
                     }
 
                     // update local `greeting` variable to match persisted value
@@ -624,7 +730,26 @@ export default function App() {
                                 value={dropdownOptions[0]}
                                 placeholder="Select an option"/>
 
-                            <InputContactForm/>
+
+                            {isInputContactFormAvailable &&
+                            <>
+                                <input
+                                    autoComplete="off"
+                                    defaultValue=""
+                                    id="contact"
+                                    onChange={e => setButtonDisabled(!e.target.value)}
+                                    placeholder="Enter account handler"
+                                    style={{flex: 1}}
+                                />
+                                <button
+                                    disabled={buttonDisabled}
+                                    style={{borderRadius: '0 5px 5px 0'}}
+                                >
+                                    Send
+                                </button>
+                            </>
+                            }
+
                             <LoginGithub/>
 
                         </div>
@@ -680,7 +805,7 @@ export default function App() {
                                         try {
                                             const owners = await window.contract.get_owners({
                                                 "contact":
-                                                    {"contact_type": sendFormType, "value": sendFormContact}
+                                                    {"category": sendFormType, "value": sendFormContact}
                                             });
 
                                             console.log(sendFormContact)
@@ -693,7 +818,7 @@ export default function App() {
                                                 try {
                                                     await window.contract.send({
                                                         "contact":
-                                                            {"contact_type": sendFormType, "value": sendFormContact}
+                                                            {"category": sendFormType, "value": sendFormContact}
                                                     }, 300000000000000, ConvertToYoctoNear(sendFormNearAmount))
 
                                                     setShowNotification({method: "call", data: "send"});
