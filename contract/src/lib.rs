@@ -1,42 +1,45 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use near_sdk::wee_alloc;
-use near_sdk::{env, near_bindgen, AccountId, Balance, Promise};
-use near_sdk::json_types::Base58PublicKey;
-use near_sdk::collections::UnorderedMap;
+use near_sdk::{env, near_bindgen, AccountId, Balance, Promise, PanicOnDefault};
+use near_sdk::json_types::{ValidAccountId, Base58PublicKey, U128};
+use near_sdk::collections::{LookupMap, UnorderedMap};
 use std::collections::HashMap;
 
-const ACCESS_KEY_ALLOWANCE: u128 = 10_000_000_000_000_000_000_000;
-// 0.01
+/// Price per 1 byte of storage from mainnet config after `0.18` release and protocol version `42`.
+/// It's 10 times lower than the genesis price.
+pub const STORAGE_PRICE_PER_BYTE: Balance = 10_000_000_000_000_000_000;
+
 const MIN_DEPOSIT_AMOUNT: u128 = 100_000_000_000_000_000_000_000;
-// 0.1
-const MASTER_ACCOUNT_ID: &str = "dev-1614425625888-4173456"; // account to whitelist keys
-// TODO Set master account
+//0.1
+const STORAGE_COST_PER_KEY: u128 = 1000 * STORAGE_PRICE_PER_BYTE; //0.01
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 #[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize)]
-pub struct NearAuth {
+#[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
+pub struct Contract {
+    master_account_id: AccountId,
     accounts: UnorderedMap<AccountId, Vec<Contact>>,
-    requests: UnorderedMap<AccountId, Contact>,
-    whitelisted_keys: UnorderedMap<AccountId, Base58PublicKey>,
+
+    requests: UnorderedMap<Base58PublicKey, Request>,
+
+    pub storage_deposits: LookupMap<AccountId, Balance>,
 }
 
-impl Default for NearAuth {
-    fn default() -> Self {
-        Self {
-            accounts: UnorderedMap::new(b"e".to_vec()),
-            requests: UnorderedMap::new(b"p".to_vec()),
-            whitelisted_keys: UnorderedMap::new(b"k".to_vec()),
-        }
-    }
+/// Helper structure to for keys of the persistent collections.
+#[derive(BorshSerialize)]
+pub enum StorageKey {
+    Accounts,
+    Requests,
+    StorageDeposits,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]
 #[serde(crate = "near_sdk::serde")]
-pub enum ContactTypes {
+pub enum ContactCategories {
     Email,
     Telegram,
     Twitter,
@@ -47,83 +50,195 @@ pub enum ContactTypes {
 #[derive(Clone, BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(crate = "near_sdk::serde")]
 pub struct Contact {
-    pub contact_type: ContactTypes,
+    pub category: ContactCategories,
     pub value: String,
+}
+
+#[derive(Clone, BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(crate = "near_sdk::serde")]
+pub struct Request {
+    pub contact: Option<Contact>,
+    pub account_id: AccountId,
 }
 
 
 #[near_bindgen]
-impl NearAuth {
-    pub fn whitelist_key(&mut self, account_id: AccountId, public_key: Base58PublicKey) {
-        assert!(env::predecessor_account_id() == MASTER_ACCOUNT_ID, "No access");
-        self.whitelisted_keys.insert(&account_id, &public_key);
+impl Contract {
+    #[init]
+    pub fn new(master_account_id: ValidAccountId) -> Self {
+        Self {
+            master_account_id: master_account_id.into(),
+            accounts: UnorderedMap::new(StorageKey::Accounts.try_to_vec().unwrap()),
+            requests: UnorderedMap::new(StorageKey::Requests.try_to_vec().unwrap()),
+            storage_deposits: LookupMap::new(StorageKey::StorageDeposits.try_to_vec().unwrap())
+        }
     }
+
+    pub fn whitelist_key(&mut self, account_id: ValidAccountId, public_key: Base58PublicKey) {
+        assert!(env::predecessor_account_id() == self.master_account_id, "No access");
+
+        let storage_paid = Contract::storage_paid(self, account_id.clone());
+
+        assert!(
+            storage_paid.0 >= STORAGE_COST_PER_KEY,
+            "{} requires minimum storage deposit of {}",
+            account_id, STORAGE_COST_PER_KEY
+        );
+
+        let account_id_string: AccountId = account_id.into();
+
+        match Contract::get_requested_public_key(self, account_id_string.clone()) {
+            None => {
+                let request = Request {
+                    contact: None,
+                    account_id: account_id_string.clone(),
+                };
+
+                self.requests.insert(&public_key, &request);
+
+                // update storage
+                let balance: Balance = storage_paid.0 - STORAGE_COST_PER_KEY;
+                self.storage_deposits.insert(&account_id_string, &balance);
+            }
+            Some(_) => {
+                env::panic(b"Request for this account already exist. Please remove it to continue")
+            }
+        }
+    }
+
 
     #[payable]
     pub fn start_auth(&mut self, public_key: Base58PublicKey, contact: Contact) -> Promise {
-        assert!(
-            env::attached_deposit() >= ACCESS_KEY_ALLOWANCE,
-            "Attached deposit must be greater than {} yNEAR",
-            ACCESS_KEY_ALLOWANCE
-        );
+        assert_one_yocto();
 
-        // check if contact exists
+        let account_id: AccountId = env::predecessor_account_id();
 
-        assert!(self.has_whitelisted_key(env::predecessor_account_id()) == true,
-                "Whitelisted key not found");
+        let contact_owner = Contract::get_owners(self, contact.clone());
+        assert!(contact_owner.is_empty(), "Contact already registered");
 
-        assert_eq!(
-            self.get_whitelisted_key(env::predecessor_account_id()).unwrap(),
-            public_key,
-            "Only whitelisted keys are allowed"
-        );
+        match self.get_request(public_key.clone()) {
+            Some(request) => {
+                assert_eq!(
+                    request.account_id,
+                    account_id,
+                    "Key whitelisted for different account"
+                );
 
+                match request.contact {
+                    None => {
+                        self.requests.insert(
+                            &public_key,
+                            &Request {
+                                contact: Some(contact),
+                                account_id,
+                            },
+                        );
 
-        self.requests.insert(
-            &env::predecessor_account_id(),
-            &contact,
-        );
-
-        self.whitelisted_keys.remove(&env::predecessor_account_id());
-
-        let pk = public_key.into();
-        Promise::new(env::current_account_id()).add_access_key(
-            pk,
-            ACCESS_KEY_ALLOWANCE,
-            env::current_account_id(),
-            b"confirm_auth".to_vec(),
-        )
+                        let pk = public_key.into();
+                        Promise::new(env::current_account_id()).add_access_key(
+                            pk,
+                            STORAGE_COST_PER_KEY,
+                            env::current_account_id(),
+                            b"confirm_auth".to_vec(),
+                        )
+                    }
+                    Some(_) =>
+                        env::panic(b"Contact already exists for this request")
+                }
+            }
+            None => env::panic(b"Only whitelisted keys allowed")
+        }
     }
 
-    pub fn confirm_auth(&mut self, account_id: AccountId, contact: Contact) {
+    pub fn confirm_auth(&mut self) {
         assert_eq!(
             env::predecessor_account_id(),
             env::current_account_id(),
-            "Auth can come from this account"
+            "Confirm auth can come from this contract only"
         );
 
-        let requested_contact: Contact = self.get_request(account_id.clone()).unwrap();
+        let public_key = env::signer_account_pk();
+        let public_key_string: Base58PublicKey = Base58PublicKey::try_from(public_key.clone()).unwrap();
 
-        assert_eq!(contact.value, requested_contact.value, "Different contact data");
-        assert_eq!(contact.contact_type, requested_contact.contact_type, "Different contact data");
+        match Contract::get_request(self, public_key_string.clone()) {
+            Some(request) => {
+                match request.contact {
+                    Some(requested_contact) => {
+                        Promise::new(env::current_account_id()).delete_key(
+                            public_key
+                        );
 
-        Promise::new(env::current_account_id()).delete_key(
-            env::signer_account_pk()
-        );
+                        let account_id: AccountId = request.account_id;
 
-        let mut contacts = self.get_contacts(account_id.clone()).unwrap_or(vec![]);
-        contacts.push(contact);
-        self.accounts.insert(&account_id, &contacts);
+                        self.requests.remove(&public_key_string).expect("Unexpected request");
 
-        self.requests.remove(&account_id).expect("Unexpected request");
+                        let initial_storage_usage = env::storage_usage();
+
+                        let mut contacts = self.get_contacts(account_id.clone()).unwrap_or(vec![]);
+                        contacts.push(requested_contact);
+                        self.accounts.insert(&account_id, &contacts);
+
+                        // update storage
+                        let tokens_per_entry_in_bytes = env::storage_usage() - initial_storage_usage;
+                        let tokens_per_entry_storage_price: Balance = Balance::from(tokens_per_entry_in_bytes) * STORAGE_PRICE_PER_BYTE;
+                        let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
+
+                        assert!(
+                            storage_paid.0 >= tokens_per_entry_storage_price,
+                            "{} requires minimum storage of {}", account_id, tokens_per_entry_storage_price
+                        );
+
+                        let balance: Balance = storage_paid.0 + STORAGE_COST_PER_KEY - tokens_per_entry_storage_price;
+                        self.storage_deposits.insert(&account_id, &balance);
+
+                        env::log(format!("@{} spent {} yNEAR for storage", account_id, tokens_per_entry_storage_price).as_bytes());
+                    }
+                    None =>
+                        env::panic(b"Confirm of undefined contact")
+                }
+            }
+            None => {
+                env::log(format!("Illegal confirm_auth request for key {:?}", public_key_string).as_bytes());
+            }
+        }
     }
 
-    pub fn get_request(&self, account_id: AccountId) -> Option<Contact> {
-        match self.requests.get(&account_id) {
-            Some(contact) => Some(contact),
+    pub fn get_request(&self, public_key: Base58PublicKey) -> Option<Request> {
+        match self.requests.get(&public_key) {
+            Some(request) => Some(request),
             None => None
         }
     }
+
+
+    pub fn get_requested_public_key(&self, account_id: AccountId) -> Option<Base58PublicKey> {
+        self.requests
+            .iter()
+            .find_map(|(key, request)| if request.account_id == account_id { Some(key) } else { None })
+    }
+
+    pub fn remove_request(&mut self) {
+        let account_id = env::predecessor_account_id();
+
+        match Contract::get_requested_public_key(self, account_id.clone()) {
+            Some(public_key) => {
+                self.requests.remove(&public_key);
+
+                Promise::new(env::current_account_id()).delete_key(
+                    public_key.into()
+                );
+
+                // update storage
+                let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
+                let balance: Balance = storage_paid.0 + STORAGE_COST_PER_KEY;
+                self.storage_deposits.insert(&account_id, &balance);
+            }
+            None => {
+                env::panic(b"Request not found")
+            }
+        }
+    }
+
 
     pub fn get_contacts(&self, account_id: AccountId) -> Option<Vec<Contact>> {
         match self.accounts.get(&account_id) {
@@ -132,13 +247,13 @@ impl NearAuth {
         }
     }
 
-    pub fn get_contacts_by_type(&self, account_id: AccountId, contact_type: ContactTypes) -> Option<Vec<String>> {
+    pub fn get_contacts_by_type(&self, account_id: AccountId, category: ContactCategories) -> Option<Vec<String>> {
         match self.accounts.get(&account_id) {
             Some(contacts) =>
                 {
                     let filtered_contacts: Vec<String> = contacts
                         .into_iter()
-                        .filter(|contact| contact.contact_type == contact_type)
+                        .filter(|contact| contact.category == category)
                         .map(|contact| contact.value)
                         .collect();
                     Some(filtered_contacts)
@@ -147,20 +262,8 @@ impl NearAuth {
         }
     }
 
-
-    pub fn get_whitelisted_key(&self, account_id: AccountId) -> Option<Base58PublicKey> {
-        match self.whitelisted_keys.get(&account_id) {
-            Some(key) => Some(key),
-            None => None
-        }
-    }
-
-    pub fn has_whitelisted_key(&self, account_id: AccountId) -> bool {
-        self.get_whitelisted_key(account_id) != None
-    }
-
-    pub fn remove_whitelisted_key(&mut self) {
-        self.whitelisted_keys.remove(&env::predecessor_account_id());
+    pub fn has_requested_public_key(&self, account_id: AccountId) -> bool {
+        self.get_requested_public_key(account_id) != None
     }
 
 
@@ -170,11 +273,12 @@ impl NearAuth {
         assert!(tokens >= MIN_DEPOSIT_AMOUNT, "Minimal amount is 0.1 NEAR");
 
         let owners = self.get_owners(contact);
-        assert!(owners.len() > 0, "Contact not found"); // TODO Send Tip
-        assert!(owners.len() == 1, "Illegal contact owners quantity");
+        let owners_quantity = owners.len();
+        assert!(owners_quantity > 0, "Contact not found"); // TODO Send Tip
+        assert!(owners_quantity == 1, "Illegal contact owners quantity");
 
         let recipient = owners.get(0).unwrap().to_string();
-        env::log(format!("Tokens sent to @{}", recipient.clone()).as_bytes());
+        env::log(format!("Tokens sent to @{}", recipient).as_bytes());
 
         Promise::new(recipient).transfer(tokens)
     }
@@ -194,7 +298,7 @@ impl NearAuth {
             .collect()
     }
 
-    pub fn get_all_contacts_by_type(&self, contact_type: ContactTypes, from_index: u64, limit: u64) -> HashMap<AccountId, Vec<String>> {
+    pub fn get_all_contacts_by_type(&self, category: ContactCategories, from_index: u64, limit: u64) -> HashMap<AccountId, Vec<String>> {
         assert!(limit <= 100, "Abort. Limit > 100");
 
         let keys = self.accounts.keys_as_vector();
@@ -202,11 +306,11 @@ impl NearAuth {
         (from_index..std::cmp::min(from_index + limit, keys.len()))
             .map(|index| {
                 let account_id = keys.get(index).unwrap();
-                let all_contacts = self.get_contacts_by_type(account_id.clone(), contact_type.clone()).unwrap();
+                let all_contacts = self.get_contacts_by_type(account_id.clone(), category.clone()).unwrap();
                 (account_id, all_contacts)
             })
-            .filter(|(_k, v)| v.len() > 0)
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter(|(_k, v)| !v.is_empty())
+            .map(|(k, v)| (k, v))
             .collect()
     }
 
@@ -225,7 +329,7 @@ impl NearAuth {
                 {
                     let filtered_contacts: Vec<Contact> = contacts
                         .into_iter()
-                        .filter(|_contact| _contact.contact_type == contact.contact_type && _contact.value == contact.value)
+                        .filter(|_contact| _contact.category == contact.category && _contact.value == contact.value)
                         // todo shorten
                         .collect();
                     filtered_contacts.len() == 1
@@ -236,18 +340,28 @@ impl NearAuth {
 
     pub fn remove(&mut self, contact: Contact) -> bool {
         let account_id = env::predecessor_account_id();
-        let is_owner = NearAuth::is_owner(self, account_id.clone(), contact.clone());
+        let is_owner = Contract::is_owner(self, account_id.clone(), contact.clone());
 
         assert!(is_owner, "Not an owner of this contact");
 
         match self.accounts.get(&account_id) {
             Some(contacts) =>
                 {
+                    let initial_storage_usage = env::storage_usage();
+
                     let filtered_contacts: Vec<Contact> = contacts
                         .into_iter()
-                        .filter(|_contact| _contact.contact_type != contact.contact_type && _contact.value != contact.value)
+                        .filter(|_contact| _contact.category != contact.category && _contact.value != contact.value)
                         .collect();
                     self.accounts.insert(&account_id, &filtered_contacts);
+
+                    let tokens_per_entry_in_bytes = initial_storage_usage - env::storage_usage();
+                    let tokens_per_entry_storage_price: Balance = Balance::from(tokens_per_entry_in_bytes) * STORAGE_PRICE_PER_BYTE;
+                    let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
+                    let balance: Balance = storage_paid.0 + tokens_per_entry_storage_price;
+                    self.storage_deposits.insert(&account_id.clone(), &balance);
+                    env::log(format!("@{} unlocked {} yNEAR from storage", account_id, tokens_per_entry_storage_price).as_bytes());
+
                     true
                 }
             None => false
@@ -256,8 +370,63 @@ impl NearAuth {
 
     pub fn remove_all(&mut self) {
         let account_id = env::predecessor_account_id();
+
+        let initial_storage_usage = env::storage_usage();
+
         self.accounts.insert(&account_id, &vec![]);
+
+        let tokens_per_entry_in_bytes = initial_storage_usage - env::storage_usage();
+        let tokens_per_entry_storage_price: Balance = Balance::from(tokens_per_entry_in_bytes) * STORAGE_PRICE_PER_BYTE;
+        let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
+        let balance: Balance = storage_paid.0 + tokens_per_entry_storage_price;
+        self.storage_deposits.insert(&account_id, &balance);
+        env::log(format!("@{} unlocked {} yNEAR from storage", account_id, tokens_per_entry_storage_price).as_bytes());
     }
+
+    #[payable]
+    pub fn storage_deposit(&mut self, account_id: Option<ValidAccountId>) {
+        let storage_account_id = account_id
+            .map(|a| a.into())
+            .unwrap_or_else(env::predecessor_account_id);
+        let deposit = env::attached_deposit();
+        assert!(
+            deposit >= STORAGE_COST_PER_KEY,
+            "Requires minimum deposit of {}",
+            STORAGE_COST_PER_KEY
+        );
+
+        // update storage
+        let mut balance: u128 = self.storage_deposits.get(&storage_account_id).unwrap_or(0);
+        balance += deposit;
+        self.storage_deposits.insert(&storage_account_id, &balance);
+    }
+
+    #[payable]
+    pub fn storage_withdraw(&mut self) {
+        assert_one_yocto();
+        let owner_id = env::predecessor_account_id();
+        let amount = self.storage_deposits.remove(&owner_id).unwrap_or(0);
+        if amount > 0 {
+            Promise::new(owner_id).transfer(amount);
+        }
+    }
+
+    pub fn storage_amount(&self) -> U128 {
+        U128(STORAGE_COST_PER_KEY)
+    }
+
+    pub fn storage_paid(&self, account_id: ValidAccountId) -> U128 {
+        U128(self.storage_deposits.get(account_id.as_ref()).unwrap_or(0))
+    }
+}
+
+/* UTILS */
+pub(crate) fn assert_one_yocto() {
+    assert_eq!(
+        env::attached_deposit(),
+        1,
+        "Requires attached deposit of exactly 1 yoctoNEAR",
+    )
 }
 
 #[cfg(test)]
@@ -292,7 +461,7 @@ mod tests {
     fn set_then_get_greeting() {
         let context = get_context(vec![], false);
         testing_env!(context);
-        let mut contract = NearAuth::default();
+        let mut contract = Contract::default();
         contract.set_greeting("howdy".to_string());
         assert_eq!(
             "howdy".to_string(),
@@ -304,7 +473,7 @@ mod tests {
     fn get_default_greeting() {
         let context = get_context(vec![], true);
         testing_env!(context);
-        let contract = NearAuth::default();
+        let contract = Contract::default();
         // this test did not call set_greeting so should return the default "Hello" greeting
         assert_eq!(
             "Hello".to_string(),
