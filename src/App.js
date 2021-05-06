@@ -318,7 +318,7 @@ export default function App() {
                     if (location.search) {
                         const query = JSON.parse(JSON.stringify(queryString.parse(location.search)));
                         if (query && query.hasOwnProperty("key") && query.hasOwnProperty("contact") && query.hasOwnProperty("type")) {
-                            const requested_public_key = await window.contract.get_requested_public_key({
+                            const requested_public_key = await window.contract.get_requested_public_key_wrapped({
                                 account_id: window.accountId
                             });
 
@@ -453,7 +453,7 @@ export default function App() {
 
     const GetRequest = async () => {
         try {
-            const requested_public_key = await window.contract.get_requested_public_key({
+            const requested_public_key = await window.contract.get_requested_public_key_wrapped({
                 account_id: window.accountId
             });
 

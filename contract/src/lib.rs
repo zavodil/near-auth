@@ -2,7 +2,7 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 use near_sdk::wee_alloc;
-use near_sdk::{env, near_bindgen, AccountId, Balance, Promise, PanicOnDefault};
+use near_sdk::{env, near_bindgen, AccountId, PublicKey, Balance, Promise, PanicOnDefault};
 use near_sdk::json_types::{ValidAccountId, Base58PublicKey, U128};
 use near_sdk::collections::{LookupMap, UnorderedMap};
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 pub struct Contract {
     master_account_id: AccountId,
     accounts: UnorderedMap<AccountId, Vec<Contact>>,
-    requests: UnorderedMap<Base58PublicKey, Request>,
+    requests: UnorderedMap<PublicKey, Request>,
     storage_deposits: LookupMap<AccountId, Balance>,
 }
 
@@ -91,7 +91,7 @@ impl Contract {
                     account_id: account_id_string.clone(),
                 };
 
-                self.requests.insert(&public_key, &request);
+                self.requests.insert(&public_key.into(), &request);
 
                 // update storage
                 let balance: Balance = storage_paid.0 - STORAGE_COST_PER_KEY;
@@ -124,7 +124,7 @@ impl Contract {
                 match request.contact {
                     None => {
                         self.requests.insert(
-                            &public_key,
+                            &public_key.clone().into(),
                             &Request {
                                 contact: Some(contact),
                                 account_id,
@@ -167,7 +167,7 @@ impl Contract {
 
                         let account_id: AccountId = request.account_id;
 
-                        self.requests.remove(&public_key_string).expect("Unexpected request");
+                        self.requests.remove(&public_key_string.into()).expect("Unexpected request");
 
                         let initial_storage_usage = env::storage_usage();
 
@@ -201,17 +201,23 @@ impl Contract {
     }
 
     pub fn get_request(&self, public_key: Base58PublicKey) -> Option<Request> {
-        match self.requests.get(&public_key) {
+        match self.requests.get(&public_key.into()) {
             Some(request) => Some(request),
             None => None
         }
     }
 
 
-    pub fn get_requested_public_key(&self, account_id: AccountId) -> Option<Base58PublicKey> {
+    pub fn get_requested_public_key(&self, account_id: AccountId) -> Option<PublicKey> {
         self.requests
             .iter()
-            .find_map(|(key, request)| if request.account_id == account_id { Some(key) } else { None })
+            .find_map(|(key, request)| if request.account_id == account_id { Some(key.into()) } else { None })
+    }
+
+    pub fn get_requested_public_key_wrapped(&self, account_id: AccountId) -> Option<Base58PublicKey > {
+        self.requests
+            .iter()
+            .find_map(|(key, request)| if request.account_id == account_id { Some(Base58PublicKey::try_from(key).unwrap()) } else { None })
     }
 
     pub fn remove_request(&mut self) {
@@ -219,7 +225,7 @@ impl Contract {
 
         match Contract::get_requested_public_key(self, account_id.clone()) {
             Some(public_key) => {
-                self.requests.remove(&public_key);
+                self.requests.remove(&public_key.clone().into());
 
                 Promise::new(env::current_account_id()).delete_key(
                     public_key.into()
