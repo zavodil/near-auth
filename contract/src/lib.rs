@@ -2,17 +2,22 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 use near_sdk::wee_alloc;
-use near_sdk::{env, near_bindgen, AccountId, PublicKey, Balance, Promise, PanicOnDefault};
-use near_sdk::json_types::{ValidAccountId, Base58PublicKey, U128};
+use near_sdk::{env, near_bindgen, AccountId, Balance, Promise, PanicOnDefault};
+use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::collections::{LookupMap, UnorderedMap};
 use std::collections::HashMap;
+use sha256::digest;
+
+type SecretKey = String;
+type RequestKey = String;
 
 /// Price per 1 byte of storage from mainnet config after `0.18` release and protocol version `42`.
 /// It's 10 times lower than the genesis price.
 pub const STORAGE_PRICE_PER_BYTE: Balance = 10_000_000_000_000_000_000;
 
-const MIN_SEND_AMOUNT: u128 = 100_000_000_00_000_000_000_000; //0.01
-const STORAGE_COST_PER_KEY: u128 = 1000 * STORAGE_PRICE_PER_BYTE; //0.01
+const MIN_SEND_AMOUNT: u128 = 100_000_000_00_000_000_000_000;
+//0.01
+const WHITELIST_STORAGE_COST: u128 = 100_000_000_00_000_000_000_000; //0.01
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
@@ -22,7 +27,7 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 pub struct Contract {
     master_account_id: AccountId,
     accounts: UnorderedMap<AccountId, Vec<Contact>>,
-    requests: UnorderedMap<PublicKey, Request>,
+    requests: UnorderedMap<RequestKey, Request>,
     storage_deposits: LookupMap<AccountId, Balance>,
 }
 
@@ -67,34 +72,34 @@ impl Contract {
             master_account_id: master_account_id.into(),
             accounts: UnorderedMap::new(StorageKey::Accounts.try_to_vec().unwrap()),
             requests: UnorderedMap::new(StorageKey::Requests.try_to_vec().unwrap()),
-            storage_deposits: LookupMap::new(StorageKey::StorageDeposits.try_to_vec().unwrap())
+            storage_deposits: LookupMap::new(StorageKey::StorageDeposits.try_to_vec().unwrap()),
         }
     }
 
-    pub fn whitelist_key(&mut self, account_id: ValidAccountId, public_key: Base58PublicKey) {
+    pub fn whitelist_key(&mut self, account_id: ValidAccountId, request_key: RequestKey) {
         assert!(env::predecessor_account_id() == self.master_account_id, "No access");
 
         let storage_paid = Contract::storage_paid(self, account_id.clone());
 
         assert!(
-            storage_paid.0 >= STORAGE_COST_PER_KEY,
+            storage_paid.0 >= WHITELIST_STORAGE_COST,
             "{} requires minimum storage deposit of {}",
-            account_id, STORAGE_COST_PER_KEY
+            account_id, WHITELIST_STORAGE_COST
         );
 
         let account_id_string: AccountId = account_id.into();
 
-        match Contract::get_requested_public_key(self, account_id_string.clone()) {
+        match Contract::get_request_key(self, account_id_string.clone()) {
             None => {
                 let request = Request {
                     contact: None,
                     account_id: account_id_string.clone(),
                 };
 
-                self.requests.insert(&public_key.into(), &request);
+                self.requests.insert(&request_key, &request);
 
                 // update storage
-                let balance: Balance = storage_paid.0 - STORAGE_COST_PER_KEY;
+                let balance: Balance = storage_paid.0 - WHITELIST_STORAGE_COST;
                 self.storage_deposits.insert(&account_id_string, &balance);
             }
             Some(_) => {
@@ -105,7 +110,7 @@ impl Contract {
 
 
     #[payable]
-    pub fn start_auth(&mut self, public_key: Base58PublicKey, contact: Contact) -> Promise {
+    pub fn start_auth(&mut self, request_key: RequestKey, contact: Contact) {
         assert_one_yocto();
 
         let account_id: AccountId = env::predecessor_account_id();
@@ -113,7 +118,7 @@ impl Contract {
         let contact_owner = Contract::get_owners(self, contact.clone());
         assert!(contact_owner.is_empty(), "Contact already registered");
 
-        match self.get_request(public_key.clone()) {
+        match self.get_request(request_key.clone()) {
             Some(request) => {
                 assert_eq!(
                     request.account_id,
@@ -124,20 +129,12 @@ impl Contract {
                 match request.contact {
                     None => {
                         self.requests.insert(
-                            &public_key.clone().into(),
+                            &request_key,
                             &Request {
                                 contact: Some(contact),
                                 account_id,
                             },
                         );
-
-                        let pk = public_key.into();
-                        Promise::new(env::current_account_id()).add_access_key(
-                            pk,
-                            STORAGE_COST_PER_KEY,
-                            env::current_account_id(),
-                            b"confirm_auth".to_vec(),
-                        )
                     }
                     Some(_) =>
                         env::panic(b"Contact already exists for this request")
@@ -147,27 +144,25 @@ impl Contract {
         }
     }
 
-    pub fn confirm_auth(&mut self) {
-        assert_eq!(
-            env::predecessor_account_id(),
-            env::current_account_id(),
-            "Confirm auth can come from this contract only"
-        );
+    fn get_sha256(key: SecretKey) -> String {
+        digest(key)
+    }
 
-        let public_key = env::signer_account_pk();
-        let public_key_string: Base58PublicKey = Base58PublicKey::try_from(public_key.clone()).unwrap();
+    pub fn confirm_auth(&mut self, key: SecretKey) {
+        let account_id = env::predecessor_account_id();
+        let request_key = Contract::get_sha256(key);
 
-        match Contract::get_request(self, public_key_string.clone()) {
+        match Contract::get_request(self, request_key.clone()) {
             Some(request) => {
+                assert_eq!(
+                    account_id,
+                    request.account_id,
+                    "No access to confirm this request"
+                );
+
                 match request.contact {
                     Some(requested_contact) => {
-                        Promise::new(env::current_account_id()).delete_key(
-                            public_key
-                        );
-
-                        let account_id: AccountId = request.account_id;
-
-                        self.requests.remove(&public_key_string.into()).expect("Unexpected request");
+                        self.requests.remove(&request_key).expect("Unexpected request");
 
                         let initial_storage_usage = env::storage_usage();
 
@@ -185,7 +180,7 @@ impl Contract {
                             "{} requires minimum storage of {}", account_id, tokens_per_entry_storage_price
                         );
 
-                        let balance: Balance = storage_paid.0 + STORAGE_COST_PER_KEY - tokens_per_entry_storage_price;
+                        let balance: Balance = storage_paid.0 + WHITELIST_STORAGE_COST - tokens_per_entry_storage_price;
                         self.storage_deposits.insert(&account_id, &balance);
 
                         env::log(format!("@{} spent {} yNEAR for storage", account_id, tokens_per_entry_storage_price).as_bytes());
@@ -195,45 +190,35 @@ impl Contract {
                 }
             }
             None => {
-                env::log(format!("Illegal confirm_auth request for key {:?}", public_key_string).as_bytes());
+                env::panic(b"Request not found");
             }
         }
     }
 
-    pub fn get_request(&self, public_key: Base58PublicKey) -> Option<Request> {
-        match self.requests.get(&public_key.into()) {
+    pub fn get_request(&self, request_key: RequestKey) -> Option<Request> {
+        match self.requests.get(&request_key) {
             Some(request) => Some(request),
             None => None
         }
     }
 
 
-    pub fn get_requested_public_key(&self, account_id: AccountId) -> Option<PublicKey> {
+    pub fn get_request_key(&self, account_id: AccountId) -> Option<RequestKey> {
         self.requests
             .iter()
-            .find_map(|(key, request)| if request.account_id == account_id { Some(key.into()) } else { None })
-    }
-
-    pub fn get_requested_public_key_wrapped(&self, account_id: AccountId) -> Option<Base58PublicKey > {
-        self.requests
-            .iter()
-            .find_map(|(key, request)| if request.account_id == account_id { Some(Base58PublicKey::try_from(key).unwrap()) } else { None })
+            .find_map(|(key, request)| if request.account_id == account_id { Some(key) } else { None })
     }
 
     pub fn remove_request(&mut self) {
         let account_id = env::predecessor_account_id();
 
-        match Contract::get_requested_public_key(self, account_id.clone()) {
-            Some(public_key) => {
-                self.requests.remove(&public_key.clone().into());
-
-                Promise::new(env::current_account_id()).delete_key(
-                    public_key.into()
-                );
+        match Contract::get_request_key(self, account_id.clone()) {
+            Some(request_key) => {
+                self.requests.remove(&request_key.clone().into());
 
                 // update storage
                 let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
-                let balance: Balance = storage_paid.0 + STORAGE_COST_PER_KEY;
+                let balance: Balance = storage_paid.0 + WHITELIST_STORAGE_COST;
                 self.storage_deposits.insert(&account_id, &balance);
             }
             None => {
@@ -241,7 +226,6 @@ impl Contract {
             }
         }
     }
-
 
     pub fn get_contacts(&self, account_id: AccountId) -> Option<Vec<Contact>> {
         match self.accounts.get(&account_id) {
@@ -265,8 +249,8 @@ impl Contract {
         }
     }
 
-    pub fn has_requested_public_key(&self, account_id: AccountId) -> bool {
-        self.get_requested_public_key(account_id) != None
+    pub fn has_request_key(&self, account_id: AccountId) -> bool {
+        self.get_request_key(account_id) != None
     }
 
 
@@ -326,17 +310,9 @@ impl Contract {
             .collect()
     }
 
-        pub fn is_owner(&self, account_id: AccountId, contact: Contact) -> bool {
+    pub fn is_owner(&self, account_id: AccountId, contact: Contact) -> bool {
         match self.accounts.get(&account_id) {
-            Some(contacts) =>
-                {
-                    let filtered_contacts: Vec<Contact> = contacts
-                        .into_iter()
-                        .filter(|_contact| _contact.category == contact.category && _contact.value == contact.value)
-                        // todo shorten
-                        .collect();
-                    filtered_contacts.len() == 1
-                }
+            Some(contacts) => contacts.contains(&contact),
             None => false
         }
     }
@@ -393,9 +369,9 @@ impl Contract {
             .unwrap_or_else(env::predecessor_account_id);
         let deposit = env::attached_deposit();
         assert!(
-            deposit >= STORAGE_COST_PER_KEY,
+            deposit >= WHITELIST_STORAGE_COST,
             "Requires minimum deposit of {}",
-            STORAGE_COST_PER_KEY
+            WHITELIST_STORAGE_COST
         );
 
         // update storage
@@ -406,7 +382,6 @@ impl Contract {
 
     #[payable]
     pub fn storage_withdraw(&mut self) {
-        assert_one_yocto();
         let owner_id = env::predecessor_account_id();
         let amount = self.storage_deposits.remove(&owner_id).unwrap_or(0);
         if amount > 0 {
@@ -415,7 +390,7 @@ impl Contract {
     }
 
     pub fn storage_amount(&self) -> U128 {
-        U128(STORAGE_COST_PER_KEY)
+        U128(WHITELIST_STORAGE_COST)
     }
 
     pub fn storage_paid(&self, account_id: ValidAccountId) -> U128 {
@@ -438,49 +413,465 @@ mod tests {
     use near_sdk::MockedBlockchain;
     use near_sdk::{testing_env, VMContext};
 
-    // mock the context for testing, notice "signer_account_id" that was accessed above from env::
-    fn get_context(input: Vec<u8>, is_view: bool) -> VMContext {
-        VMContext {
-            current_account_id: "alice_near".to_string(),
-            signer_account_id: "bob_near".to_string(),
-            signer_account_pk: vec![0, 1, 2],
-            predecessor_account_id: "carol_near".to_string(),
-            input,
-            block_index: 0,
-            block_timestamp: 0,
-            account_balance: 0,
-            account_locked_balance: 0,
-            storage_usage: 0,
-            attached_deposit: 0,
-            prepaid_gas: 10u64.pow(18),
-            random_seed: vec![0, 1, 2],
-            is_view,
-            output_data_receivers: vec![],
-            epoch_height: 19,
+    fn master_account() -> AccountId { "admin.near".to_string() }
+
+    fn master_valid_account() -> ValidAccountId { ValidAccountId::try_from(master_account()).unwrap() }
+
+    fn alice_account() -> AccountId { "alice.near".to_string() }
+
+    fn alice_valid_account() -> ValidAccountId { ValidAccountId::try_from(alice_account()).unwrap() }
+
+    fn bob_account() -> AccountId { "bob.near".to_string() }
+
+    fn bob_valid_account() -> ValidAccountId { ValidAccountId::try_from(bob_account()).unwrap() }
+
+    fn alice_request_key() -> RequestKey {  digest(alice_secret_key()).to_string() }
+
+    fn alice_secret_key() -> SecretKey { "be1AcEnEsBVV4UuoZ6qGGHRFK3HDwckDj7pctw83BbkR7JJsQLs7y1gbv78f1o7UkqFAHX45CA82UPT7kDdBaSL".to_string() }
+
+    fn bob_request_key() -> RequestKey { digest(bob_secret_key()).to_string() }
+
+    fn bob_secret_key() -> SecretKey { "WRONG_KEY_be1AcEnEsBVV4UuoZ6qGGHRFK3HDwckDj7pctw83BbkR7JJsQLs7y1gbv78f1o7UkqFAHX45CA82U".to_string() }
+
+    fn alice_contact() -> Contact {
+        Contact {
+            category: ContactCategories::Telegram,
+            value: "123".to_string(),
         }
     }
 
+    fn bob_contact() -> Contact {
+        Contact {
+            category: ContactCategories::Telegram,
+            value: "456".to_string(),
+        }
+    }
+
+
+    pub fn get_context(
+        predecessor_account_id: AccountId,
+        attached_deposit: u128,
+        is_view: bool,
+    ) -> VMContext {
+        VMContext {
+            current_account_id: predecessor_account_id.clone(),
+            signer_account_id: predecessor_account_id.clone(),
+            signer_account_pk: vec![0, 1, 2],
+            predecessor_account_id,
+            input: vec![],
+            block_index: 1,
+            block_timestamp: 0,
+            epoch_height: 1,
+            account_balance: 0,
+            account_locked_balance: 0,
+            storage_usage: 10u64.pow(6),
+            attached_deposit,
+            prepaid_gas: 10u64.pow(15),
+            random_seed: vec![0, 1, 2],
+            is_view,
+            output_data_receivers: vec![],
+        }
+    }
+
+    fn ntoy(near_amount: Balance) -> Balance {
+        near_amount * 10u128.pow(24)
+    }
+
     #[test]
-    fn set_then_get_greeting() {
-        let context = get_context(vec![], false);
-        testing_env!(context);
-        let mut contract = Contract::default();
-        contract.set_greeting("howdy".to_string());
+    fn test_storage_deposit() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
         assert_eq!(
-            "howdy".to_string(),
-            contract.get_greeting("bob_near".to_string())
+            ntoy(100),
+            contract.storage_paid(alice_valid_account()).0
         );
     }
 
     #[test]
-    fn get_default_greeting() {
-        let context = get_context(vec![], true);
-        testing_env!(context);
-        let contract = Contract::default();
-        // this test did not call set_greeting so should return the default "Hello" greeting
+    fn test_storage_deposit_and_withdraw() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+        contract.storage_withdraw();
+
         assert_eq!(
-            "Hello".to_string(),
-            contract.get_greeting("francis.near".to_string())
+            0,
+            contract.storage_paid(alice_valid_account()).0
         );
+    }
+
+    #[test]
+    fn whitelist_key() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        let storage_paid_after = contract.storage_paid(alice_valid_account()).0;
+        assert!(storage_paid_before == storage_paid_after + WHITELIST_STORAGE_COST,
+                "Wrong storage deposit for whitelist {} / {}", storage_paid_before, storage_paid_after);
+
+        let alice_key = contract.get_request_key(alice_account());
+        assert_eq!(alice_key, Some(alice_request_key()), "Key wasn't added");
+
+        let bob_key = contract.get_request_key(bob_account());
+        assert!(bob_key != Some(bob_request_key()), "Wrong key added");
+
+        let alice_has_key = contract.has_request_key(alice_account());
+        assert_eq!(alice_has_key, true, "Key wasn't added");
+
+        let bob_has_key = contract.has_request_key(bob_account());
+        assert_eq!(bob_has_key, false, "Wrong key added");
+
+        let request: Request = contract.get_request(alice_request_key()).unwrap();
+        assert_eq!(request.account_id, alice_account(), "Key wasn't added");
+        assert!(request.account_id != bob_account(), "Wrong key added");
+        assert!(request.contact == None, "Contact not empty");
+    }
+
+    #[test]
+    #[should_panic(expected = "No access")]
+    fn whitelist_by_user() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        contract.whitelist_key(alice_valid_account(), bob_request_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "Request for this account already exist. Please remove it to continue")]
+    fn whitelist_twice() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        contract.whitelist_key(alice_valid_account(), bob_request_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "Requires minimum deposit of 10000000000000000000000")]
+    fn whitelist_without_storage() {
+        let context = get_context(alice_account(), 0, false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+    }
+
+    #[test]
+    fn remove_request_after_whitelist() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+        let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 0, false);
+        testing_env!(context.clone());
+
+        contract.remove_request();
+
+        let request: Option<Request> = contract.get_request(alice_request_key());
+        assert!(request == None, "Request was not removed");
+
+        let storage_paid_after = contract.storage_paid(alice_valid_account()).0;
+        assert!(storage_paid_before == storage_paid_after,
+                "Wrong storage deposit for remove_request {} / {}", storage_paid_before, storage_paid_after);
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        let alice_has_key = contract.has_request_key(alice_account());
+        assert_eq!(alice_has_key, true, "Key wasn't added on a second time");
+    }
+
+    #[test]
+    fn start_auth() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+
+        let request: Request = contract.get_request(alice_request_key()).unwrap();
+        assert!(request.contact == Some(alice_contact()), "Contact wasn't properly saved");
+    }
+
+    #[test]
+    fn remove_request_after_start_auth() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+        let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+
+        contract.remove_request();
+
+        let request: Option<Request> = contract.get_request(alice_request_key());
+        assert!(request == None, "Request was not removed");
+
+        let storage_paid_after = contract.storage_paid(alice_valid_account()).0;
+        assert!(storage_paid_before == storage_paid_after,
+                "Wrong storage deposit for remove_request {} / {}", storage_paid_before, storage_paid_after);
+    }
+
+    #[test]
+    fn confirm_auth() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+        let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+
+        let secret_key: SecretKey = digest(alice_secret_key());
+        assert!(secret_key == "9f763044a36137644ca87a50545c3eff219345d8490d1c1db597105411315a9a", "Wrong secret key generation");
+        contract.confirm_auth(alice_secret_key());
+
+        let alice_is_owner = contract.is_owner(alice_account(), alice_contact());
+        assert!(alice_is_owner == true, "Contact wasn't created");
+
+        let bob_is_owner = contract.is_owner(bob_account(), alice_contact());
+        assert!(bob_is_owner == false, "Wrong contact owner");
+
+        let storage_paid_after = contract.storage_paid(alice_valid_account()).0;
+        assert!(storage_paid_before > storage_paid_after,
+                "Storage deposit wasn't reduced after adding an item {} / {}", storage_paid_before, storage_paid_after);
+    }
+
+    #[test]
+    #[should_panic(expected = "Request not found")]
+    fn confirm_auth_with_wrong_key() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+
+        contract.confirm_auth(bob_secret_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "No access to confirm this request")]
+    fn confirm_auth_with_wrong_user() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+
+        // switch back to a context with user
+        let context = get_context(bob_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.confirm_auth(alice_secret_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "Contact already registered")]
+    fn add_same_contact_twice() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+        contract.confirm_auth(alice_secret_key());
+
+        // switch to bob
+
+        let context = get_context(bob_account(), ntoy(100), false);
+        testing_env!(context.clone());
+        contract.storage_deposit(Some(bob_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(bob_valid_account(), bob_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+        contract.confirm_auth(bob_secret_key());
+    }
+
+    #[test]
+    fn remove_contact() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+        contract.confirm_auth(alice_secret_key());
+
+        assert!(contract.is_owner(alice_account(), alice_contact()) == true, "Contact wasn't created");
+
+        contract.remove(alice_contact());
+
+        assert!(contract.is_owner(alice_account(), alice_contact()) == false, "Contact wasn't removed");
+    }
+
+    #[test]
+    #[should_panic(expected = "Contact not found")]
+    fn send_to_contact() {
+        let context = get_context(alice_account(), ntoy(100), false);
+        testing_env!(context.clone());
+
+        let mut contract = Contract::new(master_valid_account());
+
+        contract.storage_deposit(Some(alice_valid_account()));
+
+        // switch to a context with master_account
+        let context = get_context(master_account(), 0, false);
+        testing_env!(context.clone());
+        contract.whitelist_key(alice_valid_account(), alice_request_key());
+
+        // switch back to a context with user
+        let context = get_context(alice_account(), 1, false);
+        testing_env!(context.clone());
+
+        contract.start_auth(alice_request_key(), alice_contact());
+        contract.confirm_auth(alice_secret_key());
+
+        // send from bob
+
+        let context = get_context(bob_account(), ntoy(75), false);
+        testing_env!(context.clone());
+        contract.send(alice_contact());
+
+        let context = get_context(bob_account(), ntoy(75), false);
+        testing_env!(context.clone());
+        contract.send(bob_contact());
     }
 }
