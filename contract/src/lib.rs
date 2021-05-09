@@ -14,10 +14,7 @@ type RequestKey = String;
 /// Price per 1 byte of storage from mainnet config after `0.18` release and protocol version `42`.
 /// It's 10 times lower than the genesis price.
 pub const STORAGE_PRICE_PER_BYTE: Balance = 10_000_000_000_000_000_000;
-
-const MIN_SEND_AMOUNT: u128 = 100_000_000_00_000_000_000_000;
-//0.01
-const WHITELIST_STORAGE_COST: u128 = 100_000_000_00_000_000_000_000; //0.01
+const WHITELIST_STORAGE_COST: u128 = 100_000_000_000_000_000_000_000; //0.01
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
@@ -214,7 +211,7 @@ impl Contract {
 
         match Contract::get_request_key(self, account_id.clone()) {
             Some(request_key) => {
-                self.requests.remove(&request_key.clone().into());
+                self.requests.remove(&request_key);
 
                 // update storage
                 let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
@@ -257,7 +254,6 @@ impl Contract {
     #[payable]
     pub fn send(&mut self, contact: Contact) -> Promise {
         let tokens: Balance = near_sdk::env::attached_deposit();
-        assert!(tokens >= MIN_SEND_AMOUNT, "Minimal amount is 0.01 NEAR");
 
         let owners = self.get_owners(contact);
         let owners_quantity = owners.len();
@@ -425,7 +421,7 @@ mod tests {
 
     fn bob_valid_account() -> ValidAccountId { ValidAccountId::try_from(bob_account()).unwrap() }
 
-    fn alice_request_key() -> RequestKey {  digest(alice_secret_key()).to_string() }
+    fn alice_request_key() -> RequestKey { digest(alice_secret_key()).to_string() }
 
     fn alice_secret_key() -> SecretKey { "be1AcEnEsBVV4UuoZ6qGGHRFK3HDwckDj7pctw83BbkR7JJsQLs7y1gbv78f1o7UkqFAHX45CA82UPT7kDdBaSL".to_string() }
 
