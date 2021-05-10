@@ -44,7 +44,8 @@ export default function App() {
     const [sendFormContact, setSendFormContact] = React.useState("");
     const [sendFormResult, setSendFormResult] = React.useState("");
 
-    const [showStorageDeposit, setShowStorageDeposit] = React.useState(false);
+    const [showStorageDepositMenuClick, setShowStorageDepositMenuClick] = React.useState(false);
+    const [hideStorageDeposit, setHideStorageDeposit] = React.useState(false);
     const [storagePaid, setStoragePaid] = React.useState(0);
     const [inputStorageDeposit, setInputStorageDeposit] = React.useState(MIN_STORAGE_DEPOSIT);
 
@@ -145,7 +146,7 @@ export default function App() {
 
                                 try {
                                     await window.contract.start_auth({
-                                        public_key: data.public_key,
+                                        request_key: data.request_key,
                                         contact: {category: contactType, value: data.contact},
                                     }, 300000000000000, 1)
                                 } catch (e) {
@@ -192,7 +193,7 @@ export default function App() {
     const StoragePaid = () => {
         return <div className="nav user-balance" data-tip="Your Near Auth Storage"
                     onClick={async event => {
-                        setShowStorageDeposit(true)
+                        setShowStorageDepositMenuClick(true)
                     }}>
             {`Storage: ${storagePaid} Ⓝ`}
         </div>;
@@ -318,28 +319,18 @@ export default function App() {
                     if (location.search) {
                         const query = JSON.parse(JSON.stringify(queryString.parse(location.search)));
                         if (query && query.hasOwnProperty("key") && query.hasOwnProperty("contact") && query.hasOwnProperty("type")) {
-                            const requested_public_key = await window.contract.get_requested_public_key_wrapped({
+                            const request_key = await window.contract.get_request_key({
                                 account_id: window.accountId
                             });
 
-                            if (requested_public_key) {
+                            if (request_key) {
                                 setComplete("Auth request found. Processing... ");
-                                await fetch("telegram.php", {
-                                    method: 'POST',
-                                    body: JSON.stringify({
-                                        operation: "sign",
-                                        account_id: window.accountId,
-                                        contact: query.contact,
-                                        contact_type: query.type,
-                                        network: config.networkId,
-                                        key: query.key
-                                    }),
-                                    headers: {
-                                        'Accept': 'application/json',
-                                        'Content-Type': 'application/json'
-                                    }
-                                })
-                                    .then(response => response.json())
+
+                                const gas = 300000000000000;
+                                await window.contract.confirm_auth({
+                                        key: query.key,
+                                    }, gas
+                                )
                                     .then(data => {
                                         if (data.status) {
                                             setComplete(data.text);
@@ -425,11 +416,43 @@ export default function App() {
                         return <li key={contacts[key].value + "-" + i++}>
                             <div className="account">{contacts[key].value}</div>
                             <div className="type">{contacts[key].category}</div>
+                            <div className="type"><RemoveContact contact = {contacts[key]} /></div>
                         </li>;
                     })}
                 </ul>
             </div> :
             null;
+    }
+
+    const RemoveContact = (props) => {
+        return (
+            <button
+                type="clear"
+                className="remove-contact"
+                title="Remove Contact"
+                onClick={async event => {
+                    event.preventDefault()
+                    try {
+                        await window.contract.remove({
+                                contact: props.contact,
+                            },
+                            100000000000000, 0).then(() => GetContacts());
+
+                    } catch (e) {
+                        alert(
+                            'Something went wrong! \n' +
+                            'Check your browser console for more info.\n' +
+                            e.toString()
+                        )
+                        throw e
+                    }
+
+
+                }}
+            >
+                ✗
+            </button>
+        )
     }
 
     const GetContacts = async () => {
@@ -453,20 +476,26 @@ export default function App() {
 
     const GetRequest = async () => {
         try {
-            const requested_public_key = await window.contract.get_requested_public_key_wrapped({
+            const request_key = await window.contract.get_request_key({
                 account_id: window.accountId
             });
 
-            if (requested_public_key) {
+            if (request_key) {
                 const request = await window.contract.get_request({
-                    public_key: requested_public_key
+                    request_key: request_key
                 });
 
-                if (request && request.contact && request.contact.value) {
+                let queryHasKey = false;
+                if(location.search){
+                    const query = JSON.parse(JSON.stringify(queryString.parse(location.search)));
+                    queryHasKey = query && query.hasOwnProperty("key");
+                }
+
+                if (!queryHasKey && request && request.contact && request.contact.value) {
                     setComplete("Auth request found. Processing... ");
                     console.log("Request found");
                     const request = JSON.parse(window.localStorage.getItem('request'));
-                    if (request.hasOwnProperty("public_key")) {
+                    if (request.hasOwnProperty("request_key")) {
                         fetch("telegram.php", {
                             method: 'POST',
                             body: JSON.stringify({
@@ -474,7 +503,7 @@ export default function App() {
                                 contact: request.contact,
                                 contact_type: request.category || request.contact_type,
                                 telegram_id: request.value,
-                                public_key: request.public_key,
+                                request_key: request.request_key,
                                 account_id: window.accountId,
                                 network: config.networkId,
                                 additional_contact: request.additional_contact
@@ -492,6 +521,8 @@ export default function App() {
                                 } else {
                                     setWarning(data.text);
                                     setComplete("");
+                                    if(data.text == "Active request found, key already sent"){
+                                        setHideStorageDeposit(true);}
                                 }
                             })
                             .catch(err => console.error("Error:", err));
@@ -525,7 +556,7 @@ export default function App() {
                 <WhiteListedKeyRemove/>
 
 
-                {(showStorageDeposit || storagePaid < MIN_STORAGE_DEPOSIT) &&
+                {( showStorageDepositMenuClick || (!hideStorageDeposit && storagePaid < MIN_STORAGE_DEPOSIT)) &&
                 <div style={{paddingBottom: "20px"}}>
                     <fieldset id="fieldset-storage-deposit">
                         <label
@@ -614,11 +645,11 @@ export default function App() {
                     setButtonDisabled(true);
 
 
-                    const has_requested_public_key = await window.contract.has_requested_public_key({
+                    const has_request_key = await window.contract.has_request_key({
                         account_id: window.accountId
                     });
 
-                    if (has_requested_public_key) {
+                    if (has_request_key) {
                         setWarning("Previous auth attempt was not finished. Please abort previous attempt first.");
                         setWhiteListedKeyRemove(true);
                         return;
@@ -656,7 +687,7 @@ export default function App() {
 
                                         try {
                                             await window.contract.start_auth({
-                                                public_key: data.public_key,
+                                                request_key: data.request_key,
                                                 contact: {category: contactType, value: contact.value},
                                             }, 300000000000000, 1)
                                         } catch (e) {

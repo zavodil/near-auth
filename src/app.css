@@ -91,3 +91,9 @@ ul.accounts div {
 .user-balance{
     cursor: pointer;
 }
+
+.remove-contact{
+    background-color: initial;
+    color: darkred;
+    padding: 0;
+}
