@@ -46,6 +46,10 @@ ul.accounts li {
     padding-bottom: 0;
 }
 
+ul.accounts li .account {
+    font-size: 20px;
+}
+
 .contacts {
     padding-top: 20px;
 }
@@ -58,7 +62,6 @@ ul.accounts .type{
 }
 ul.accounts div {
     display: inline-block;
-    font-size: 0.8em;
     vertical-align: top;
 }
 
