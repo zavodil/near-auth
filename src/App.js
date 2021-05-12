@@ -346,6 +346,9 @@ export default function App() {
                                     })
                                     .catch(err => console.error("Error:", err));
                             }
+                            else{
+                                window.localStorage.setItem('request', "[]");
+                            }
                         } else if (query && query.hasOwnProperty("action")) {
                             if (query.action === "send" && query.hasOwnProperty("contact") && query.hasOwnProperty("type") && query.hasOwnProperty("amount")) {
                                 const type = query.type;
@@ -492,6 +495,7 @@ export default function App() {
                 }
 
                 if (!queryHasKey && request && request.contact && request.contact.value) {
+                    setHideStorageDeposit(true);
                     setComplete("Auth request found. Processing... ");
                     console.log("Request found");
                     const request = JSON.parse(window.localStorage.getItem('request'));
@@ -528,6 +532,9 @@ export default function App() {
                             .catch(err => console.error("Error:", err));
                     }
                 }
+            }
+            else{
+                window.localStorage.setItem('request', "[]");
             }
         } catch (e) {
             console.log(e)
@@ -568,7 +575,7 @@ export default function App() {
                             }}
                         >
                             {storagePaid < MIN_STORAGE_DEPOSIT
-                                ? "Storage deposit needed"
+                                ? "Storage deposit is needed, at least 0.011 NEAR"
                                 : "Storage Deposit"
                             }
                             :

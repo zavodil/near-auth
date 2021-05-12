@@ -14,7 +14,7 @@ type RequestKey = String;
 /// Price per 1 byte of storage from mainnet config after `0.18` release and protocol version `42`.
 /// It's 10 times lower than the genesis price.
 pub const STORAGE_PRICE_PER_BYTE: Balance = 10_000_000_000_000_000_000;
-const WHITELIST_STORAGE_COST: u128 = 100_000_000_000_000_000_000_000; //0.01
+const WHITELIST_STORAGE_COST: u128 = 10_000_000_000_000_000_000_000; //0.01
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
