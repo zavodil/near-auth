@@ -15,6 +15,7 @@ type RequestKey = String;
 /// It's 10 times lower than the genesis price.
 pub const STORAGE_PRICE_PER_BYTE: Balance = 10_000_000_000_000_000_000;
 const WHITELIST_STORAGE_COST: u128 = 10_000_000_000_000_000_000_000; //0.01
+const WHITELIST_FEE: u128 = 1_500_000_000_000_000_000_000; //0.0015
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
@@ -177,7 +178,7 @@ impl Contract {
                             "{} requires minimum storage of {}", account_id, tokens_per_entry_storage_price
                         );
 
-                        let balance: Balance = storage_paid.0 + WHITELIST_STORAGE_COST - tokens_per_entry_storage_price;
+                        let balance: Balance = storage_paid.0 + WHITELIST_STORAGE_COST - WHITELIST_FEE - tokens_per_entry_storage_price;
                         self.storage_deposits.insert(&account_id, &balance);
 
                         env::log(format!("@{} spent {} yNEAR for storage", account_id, tokens_per_entry_storage_price).as_bytes());
@@ -215,7 +216,7 @@ impl Contract {
 
                 // update storage
                 let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
-                let balance: Balance = storage_paid.0 + WHITELIST_STORAGE_COST;
+                let balance: Balance = storage_paid.0 + WHITELIST_STORAGE_COST - WHITELIST_FEE;
                 self.storage_deposits.insert(&account_id, &balance);
             }
             None => {
@@ -365,9 +366,8 @@ impl Contract {
             .unwrap_or_else(env::predecessor_account_id);
         let deposit = env::attached_deposit();
         assert!(
-            deposit >= WHITELIST_STORAGE_COST,
-            "Requires minimum deposit of {}",
-            WHITELIST_STORAGE_COST
+            deposit > 0,
+            "Requires positive deposit"
         );
 
         // update storage
@@ -574,9 +574,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Requires minimum deposit of 10000000000000000000000")]
+    #[should_panic(expected = "alice.near requires minimum storage deposit of 10000000000000000000000")]
     fn whitelist_without_storage() {
-        let context = get_context(alice_account(), 0, false);
+        let context = get_context(alice_account(), ntoy(1) / 1000, false);
         testing_env!(context.clone());
 
         let mut contract = Contract::new(master_valid_account());

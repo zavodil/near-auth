@@ -21,7 +21,8 @@ const config = getConfig(process.env.NODE_ENV || 'development');
 const appSettings = getAppSettings();
 
 const FRAC_DIGITS = 5;
-const MIN_STORAGE_DEPOSIT = 0.011;
+const MIN_STORAGE_DEPOSIT = 0.02;
+const REQUIRED_STORAGE_DEPOSIT = 0.015;
 
 function ConvertToYoctoNear(amount) {
     return new BN(Math.round(amount * 100000000)).mul(new BN("10000000000000000")).toString();
@@ -48,7 +49,7 @@ export default function App() {
     const [hideStorageDeposit, setHideStorageDeposit] = React.useState(false);
     const [storagePaid, setStoragePaid] = React.useState(0);
     const [inputStorageDeposit, setInputStorageDeposit] = React.useState(MIN_STORAGE_DEPOSIT);
-
+    const [incufficientStorage, setIncufficientStorage] = React.useState(true);
 
     // when the user has not yet interacted with the form, disable the button
     const [buttonDisabled, setButtonDisabled] = React.useState(true)
@@ -165,6 +166,7 @@ export default function App() {
                                     setWarning(data.text);
                                 } else {
                                     setWarning("Auth failed. Please check console for details.");
+                                    console.log(data);
                                 }
                             }
                             window.history.replaceState({}, document.title, "/");
@@ -182,21 +184,31 @@ export default function App() {
     }
 
     const LoginGithub = () => {
-        return isGithubLoginAvailable ? <GitHubLogin clientId="4fe06f510cf9e8f40028"
-                                                     redirectUri="https://testnet.auth.nearspace.info/github.php"
-                                                     scope='user:email'
-                                                     className="github-login-button"
-                                                     onSuccess={OnGithubLoginSuccess}
-                                                     onFailure={OnGithubLoginFailure}/> : null;
-    }
+        const url = (config.networkId === "testnet") ? appSettings.urlTestnet : appSettings.urlMainnet;
+        if (isGithubLoginAvailable && incufficientStorage)
+            return <button disabled={true}>Not available</button>;
+        else
+            return isGithubLoginAvailable
+                ? <GitHubLogin clientId="4fe06f510cf9e8f40028"
+                               redirectUri={`${url}github.php`}
+                               scope='user:email'
+                               className="github-login-button"
+                               onSuccess={OnGithubLoginSuccess}
+                               onFailure={OnGithubLoginFailure}/>
+                : null;
+    };
 
     const StoragePaid = () => {
-        return <div className="nav user-balance" data-tip="Your Near Auth Storage"
-                    onClick={async event => {
-                        setShowStorageDepositMenuClick(true)
-                    }}>
-            {`Storage: ${storagePaid} Ⓝ`}
-        </div>;
+        if (window.walletConnection.isSignedIn()) {
+            return <div className="nav user-balance" data-tip="Your Near Auth Storage"
+                        onClick={async event => {
+                            setShowStorageDepositMenuClick(true)
+                        }}>
+                {`Storage: ${storagePaid} Ⓝ`}
+            </div>;
+        } else {
+            return null;
+        }
     };
 
     const Header = () => {
@@ -301,6 +313,9 @@ export default function App() {
             ? nearAPI.utils.format.formatNearAmount(storagePaid, FRAC_DIGITS).replace(",", "")
             : "0";
         setStoragePaid(storagePaidFormatted);
+
+        setIncufficientStorage(Number(storagePaidFormatted) < 0.0101);
+
         return storagePaidFormatted;
     };
 
@@ -323,7 +338,11 @@ export default function App() {
                                 account_id: window.accountId
                             });
 
-                            if (request_key) {
+                            const has_request_key = await window.contract.has_request_key({
+                                account_id: window.accountId
+                            });
+
+                            if (has_request_key && request_key) {
                                 setComplete("Auth request found. Processing... ");
 
                                 const gas = 300000000000000;
@@ -335,19 +354,20 @@ export default function App() {
                                         if (data.status) {
                                             setComplete(data.text);
                                             setWarning("");
-                                            GetStoragePaid();
                                         } else {
                                             setComplete("");
-                                            setWarning("Auth failed. Please check console for details.");
+                                            setWarning("");
+                                            //setWarning("Auth failed. Please check console for details.");
                                             console.log(data.text);
                                         }
+                                        GetStoragePaid();
                                         window.history.replaceState({}, document.title, "/");
                                         requestRound = true;
                                     })
                                     .catch(err => console.error("Error:", err));
-                            }
-                            else{
+                            } else {
                                 window.localStorage.setItem('request', "[]");
+                                window.history.replaceState({}, document.title, "/");
                             }
                         } else if (query && query.hasOwnProperty("action")) {
                             if (query.action === "send" && query.hasOwnProperty("contact") && query.hasOwnProperty("type") && query.hasOwnProperty("amount")) {
@@ -419,7 +439,7 @@ export default function App() {
                         return <li key={contacts[key].value + "-" + i++}>
                             <div className="account">{contacts[key].value}</div>
                             <div className="type">{contacts[key].category}</div>
-                            <div className="type"><RemoveContact contact = {contacts[key]} /></div>
+                            <div className="type"><RemoveContact contact={contacts[key]}/></div>
                         </li>;
                     })}
                 </ul>
@@ -489,7 +509,7 @@ export default function App() {
                 });
 
                 let queryHasKey = false;
-                if(location.search){
+                if (location.search) {
                     const query = JSON.parse(JSON.stringify(queryString.parse(location.search)));
                     queryHasKey = query && query.hasOwnProperty("key");
                 }
@@ -525,15 +545,15 @@ export default function App() {
                                 } else {
                                     setWarning(data.text);
                                     setComplete("");
-                                    if(data.text == "Active request found, key already sent"){
-                                        setHideStorageDeposit(true);}
+                                    if (data.text == "Active request found, key already sent") {
+                                        setHideStorageDeposit(true);
+                                    }
                                 }
                             })
                             .catch(err => console.error("Error:", err));
                     }
                 }
-            }
-            else{
+            } else {
                 window.localStorage.setItem('request', "[]");
             }
         } catch (e) {
@@ -563,7 +583,7 @@ export default function App() {
                 <WhiteListedKeyRemove/>
 
 
-                {( showStorageDepositMenuClick || (!hideStorageDeposit && storagePaid < MIN_STORAGE_DEPOSIT)) &&
+                {(showStorageDepositMenuClick || (!hideStorageDeposit && storagePaid < REQUIRED_STORAGE_DEPOSIT)) &&
                 <div style={{paddingBottom: "20px"}}>
                     <fieldset id="fieldset-storage-deposit">
                         <label
@@ -574,8 +594,8 @@ export default function App() {
                                 marginBottom: '0.5em'
                             }}
                         >
-                            {storagePaid < MIN_STORAGE_DEPOSIT
-                                ? "Storage deposit is needed, at least 0.011 NEAR"
+                            {storagePaid < REQUIRED_STORAGE_DEPOSIT
+                                ? `Storage deposit is needed, at least ${REQUIRED_STORAGE_DEPOSIT} NEAR`
                                 : "Storage Deposit"
                             }
                             :
@@ -584,7 +604,7 @@ export default function App() {
 
                             <input
                                 autoComplete="off"
-                                defaultValue="0.011"
+                                defaultValue={inputStorageDeposit}
                                 id="storage-deposit"
                                 onChange={e => setInputStorageDeposit(e.target.value)}
                                 placeholder="Enter amount"
@@ -780,7 +800,7 @@ export default function App() {
                                     style={{flex: 1}}
                                 />
                                 <button
-                                    disabled={buttonDisabled}
+                                    disabled={buttonDisabled || incufficientStorage}
                                     style={{borderRadius: '0 5px 5px 0'}}
                                 >
                                     Send
