@@ -14,7 +14,8 @@ type RequestKey = String;
 /// Price per 1 byte of storage from mainnet config after `0.18` release and protocol version `42`.
 /// It's 10 times lower than the genesis price.
 pub const STORAGE_PRICE_PER_BYTE: Balance = 10_000_000_000_000_000_000;
-const WHITELIST_STORAGE_COST: u128 = 10_000_000_000_000_000_000_000; //0.01
+const WHITELIST_STORAGE_COST: u128 = 10_000_000_000_000_000_000_000;
+//0.01
 const WHITELIST_FEE: u128 = 1_500_000_000_000_000_000_000; //0.0015
 
 #[global_allocator]
@@ -106,14 +107,30 @@ impl Contract {
         }
     }
 
+    fn prepare_contact(contact: Contact) -> Contact {
+        if contact.category == ContactCategories::Telegram && contact.value.chars().nth(0).unwrap() == '@' {
+            Contact {
+                category: ContactCategories::Telegram,
+                value: contact.value[1..contact.value.len()].trim().to_string()
+            }
+        } else {
+            Contact {
+                category: contact.category,
+                value: contact.value.trim().to_string()
+            }
+        }
+    }
 
     #[payable]
-    pub fn start_auth(&mut self, request_key: RequestKey, contact: Contact) {
+    pub fn start_auth(&mut self, request_key: RequestKey, mut contact: Contact) {
         assert_one_yocto();
 
         let account_id: AccountId = env::predecessor_account_id();
 
+        contact = Contract::prepare_contact(contact);
+
         let contact_owner = Contract::get_owners(self, contact.clone());
+
         assert!(contact_owner.is_empty(), "Contact already registered");
 
         match self.get_request(request_key.clone()) {
@@ -216,8 +233,11 @@ impl Contract {
 
                 // update storage
                 let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
-                let balance: Balance = storage_paid.0 + WHITELIST_STORAGE_COST - WHITELIST_FEE;
+                let whitelist_storage_cost = WHITELIST_STORAGE_COST - WHITELIST_FEE;
+                let balance: Balance = storage_paid.0 + whitelist_storage_cost;
                 self.storage_deposits.insert(&account_id, &balance);
+
+                env::log(format!("@{} removed previous request for {} yNEAR", account_id, whitelist_storage_cost).as_bytes());
             }
             None => {
                 env::panic(b"Request not found")
@@ -327,7 +347,7 @@ impl Contract {
 
                     let filtered_contacts: Vec<Contact> = contacts
                         .into_iter()
-                        .filter(|_contact| _contact.category != contact.category && _contact.value != contact.value)
+                        .filter(|_contact| !(_contact.category == contact.category && _contact.value == contact.value))
                         .collect();
                     self.accounts.insert(&account_id, &filtered_contacts);
 
