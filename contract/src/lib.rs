@@ -634,7 +634,7 @@ mod tests {
         assert!(request == None, "Request was not removed");
 
         let storage_paid_after = contract.storage_paid(alice_valid_account()).0;
-        assert!(storage_paid_before == storage_paid_after,
+        assert!(storage_paid_before == storage_paid_after + WHITELIST_FEE,
                 "Wrong storage deposit for remove_request {} / {}", storage_paid_before, storage_paid_after);
 
         // switch to a context with master_account
@@ -697,7 +697,7 @@ mod tests {
         assert!(request == None, "Request was not removed");
 
         let storage_paid_after = contract.storage_paid(alice_valid_account()).0;
-        assert!(storage_paid_before == storage_paid_after,
+        assert!(storage_paid_before == storage_paid_after + WHITELIST_FEE,
                 "Wrong storage deposit for remove_request {} / {}", storage_paid_before, storage_paid_after);
     }
 
