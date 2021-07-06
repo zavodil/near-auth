@@ -26,9 +26,9 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
     master_account_id: AccountId,
-    accounts: UnorderedMap<AccountId, Vec<Contact>>,
-    accounts_for_contacts: UnorderedMap<ContactStringified, AccountId>,
-    requests: UnorderedMap<RequestKey, Request>,
+    accounts: UnorderedMap<AccountId, Vec<Contact>>, // main object, contacts of account
+    accounts_for_contacts: UnorderedMap<ContactStringified, AccountId>, // object to find owner of the contact
+    requests: UnorderedMap<RequestKey, Request>, // pending requests
     storage_deposits: LookupMap<AccountId, Balance>,
     version: u16,
 }
@@ -136,17 +136,14 @@ impl Contract {
     }
 
     #[payable]
-    pub fn start_auth(&mut self, request_key: RequestKey, mut contact: Contact) {
+    pub fn start_auth(&mut self, request_key: RequestKey, contact: Contact) {
         assert_one_yocto();
 
         let account_id: AccountId = env::predecessor_account_id();
 
-        contact = Contract::prepare_contact(contact);
+        let prepared_contact = Contract::prepare_contact(contact);
 
-        //let contact_owner = Contract::get_owners(self, contact.clone());
-        // assert!(contact_owner.is_empty(), "Contact already registered");
-
-        let contact_owner = self.get_account_for_contact(contact.clone());
+        let contact_owner = self.get_account_for_contact(prepared_contact.clone());
         assert!(contact_owner.is_none(), "Contact already registered");
 
         match self.get_request(request_key.clone()) {
@@ -162,7 +159,7 @@ impl Contract {
                         self.requests.insert(
                             &request_key,
                             &Request {
-                                contact: Some(contact),
+                                contact: Some(prepared_contact),
                                 account_id,
                             },
                         );
@@ -173,37 +170,6 @@ impl Contract {
             }
             None => env::panic(b"Only whitelisted keys allowed")
         }
-    }
-
-    fn get_sha256(key: SecretKey) -> String {
-        digest(key)
-    }
-
-    pub(crate) fn compare_contacts(contact1: Contact, contact2: Contact) -> bool {
-        if contact1.category == ContactCategories::Telegram && contact2.category == ContactCategories::Telegram {
-            return contact1.account_id == contact2.account_id;
-        } else {
-            return contact1.category == contact2.category && contact1.value == contact2.value;
-        }
-    }
-
-    // TODO only 2 chars of category??
-    fn get_contact_stringified(contact: Contact) -> String {
-        if contact.category == ContactCategories::Telegram {
-            format!("{:?}:{:?}", contact.category, Some(contact.account_id))
-        } else {
-            format!("{:?}:{}", contact.category, contact.value)
-        }
-    }
-
-    pub(crate) fn insert_accounts_for_contact(&mut self, account_id: AccountId, contact: Contact) {
-        let contact_stringified = Contract::get_contact_stringified(contact);
-        self.accounts_for_contacts.insert(&contact_stringified, &account_id);
-    }
-
-    pub(crate) fn remove_accounts_for_contact(&mut self, contact: Contact) {
-        let contact_stringified = Contract::get_contact_stringified(contact);
-        self.accounts_for_contacts.remove(&contact_stringified);
     }
 
     pub fn confirm_auth(&mut self, key: SecretKey) {
@@ -256,13 +222,43 @@ impl Contract {
         }
     }
 
+    fn get_sha256(key: SecretKey) -> String {
+        digest(key)
+    }
+
+    pub(crate) fn are_contacts_equal(contact1: Contact, contact2: Contact) -> bool {
+        if contact1.category == ContactCategories::Telegram && contact2.category == ContactCategories::Telegram {
+            contact1.account_id == contact2.account_id
+        } else {
+            contact1.category == contact2.category && contact1.value == contact2.value
+        }
+    }
+
+    // TODO only first N chars of category to reduce storage?
+    fn get_contact_stringified(contact: Contact) -> String {
+        if contact.category == ContactCategories::Telegram {
+            format!("{:?}:{:?}", contact.category, Some(contact.account_id))
+        } else {
+            format!("{:?}:{}", contact.category, contact.value)
+        }
+    }
+
+    pub(crate) fn insert_accounts_for_contact(&mut self, account_id: AccountId, contact: Contact) {
+        let contact_stringified = Contract::get_contact_stringified(contact);
+        self.accounts_for_contacts.insert(&contact_stringified, &account_id);
+    }
+
+    pub(crate) fn remove_accounts_for_contact(&mut self, contact: Contact) {
+        let contact_stringified = Contract::get_contact_stringified(contact);
+        self.accounts_for_contacts.remove(&contact_stringified);
+    }
+
     pub fn get_request(&self, request_key: RequestKey) -> Option<Request> {
         match self.requests.get(&request_key) {
             Some(request) => Some(request),
             None => None
         }
     }
-
 
     pub fn get_request_key(&self, account_id: AccountId) -> Option<RequestKey> {
         self.requests
@@ -334,21 +330,12 @@ impl Contract {
     pub fn send(&mut self, contact: Contact) -> Promise {
         let tokens: Balance = near_sdk::env::attached_deposit();
 
-
-        /*
-        let owners = self.get_owners(contact);
-        let owners_quantity = owners.len();
-        assert!(owners_quantity > 0, "Contact not found");
-        assert!(owners_quantity == 1, "Illegal contact owners quantity");
-        let recipient = owners.get(0).unwrap().to_string();
-        */
-
         let recipient = self.get_account_for_contact(contact);
         assert!(!recipient.is_none(), "Contact not found");
 
         let recipient_account_id = recipient.unwrap();
 
-        env::log(format!("Tokens sent to @{}", recipient_account_id.clone()).as_bytes());
+        env::log(format!("Tokens sent to @{}", recipient_account_id).as_bytes());
 
         Promise::new(recipient_account_id).transfer(tokens)
     }
@@ -393,60 +380,22 @@ impl Contract {
             .collect()
     }
 
-
     pub fn get_owners(&self, _contact: Contact) -> Vec<String> {
         panic!("Deprecated. Use `get_account_for_contact` instead");
-        /*
-        let keys = self.accounts.keys_as_vector();
-
-        if contact.category == ContactCategories::Telegram {
-            (0..keys.len())
-                .filter(|index| self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact))
-                .map(|index| keys.get(index).unwrap())
-                .collect()
-        } else {
-            (0..keys.len())
-                .filter(|index| self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact))
-                .map(|index| keys.get(index).unwrap())
-                .collect()
-        }
-        */
-
-        /*
-        let keys = self.accounts.keys_as_vector();
-
-        (0..keys.len())
-            .filter(|index| {
-                //self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact)
-                let contacts = self.get_contacts(keys.get(*index).unwrap());
-
-                if contact.category == ContactCategories::Telegram
-                {
-                    let telegram_contacts = contacts.filter(|telegram_contact| {
-                        telegram_contact.account_id == contact.account_id
-                    });
-
-                    telegram_contacts.len() > 0
-                } else {
-                    contacts.unwrap().contains(&contact)
-                }
-            })
-            .map(|index| keys.get(index).unwrap())
-            .collect()
-            */
     }
 
     pub fn is_owner(&self, account_id: AccountId, contact: Contact) -> bool {
         match self.accounts.get(&account_id) {
-            Some(contacts) => //contacts.contains(&contact),
+            Some(contacts) =>
                 {
                     contacts.into_iter()
-                        .any(|_contact| Contract::compare_contacts(_contact.clone(), contact.clone()))
+                        .any(|_contact| Contract::are_contacts_equal(_contact, contact.clone()))
                 }
             None => false
         }
     }
 
+    // remove contact
     pub fn remove(&mut self, contact: Contact) -> bool {
         let account_id = env::predecessor_account_id();
         let is_owner = Contract::is_owner(self, account_id.clone(), contact.clone());
@@ -460,7 +409,7 @@ impl Contract {
 
                     let filtered_contacts: Vec<Contact> = contacts
                         .into_iter()
-                        .filter(|_contact| !Contract::compare_contacts(_contact.clone(), contact.clone()))
+                        .filter(|_contact| !Contract::are_contacts_equal(_contact.clone(), contact.clone()))
                         .collect();
                     self.accounts.insert(&account_id, &filtered_contacts);
 
@@ -479,6 +428,7 @@ impl Contract {
         }
     }
 
+    // remove all contacts
     pub fn remove_all(&mut self) -> bool {
         let account_id = env::predecessor_account_id();
 
@@ -490,10 +440,6 @@ impl Contract {
                     for _contact in contacts.iter() {
                         self.remove_accounts_for_contact(_contact.clone());
                     }
-
-                    /*contacts
-                        .iter()
-                        .map(|_contact| self.remove_accounts_for_contact(_contact.clone()));*/
 
                     self.accounts.insert(&account_id, &vec![]);
 
@@ -543,7 +489,6 @@ impl Contract {
     pub fn storage_paid(&self, account_id: ValidAccountId) -> U128 {
         U128(self.storage_deposits.get(account_id.as_ref()).unwrap_or(0))
     }
-
 
     #[init(ignore_state)]
     pub fn migrate_state_1() -> Self {
@@ -602,9 +547,7 @@ pub(crate) fn get_telegram_contact(value: String, account_id: Option<u64>) -> Ve
         account_id,
     };
 
-    let mut res = Vec::new();
-    res.push(contact);
-    res
+    vec![contact]
 }
 
 
