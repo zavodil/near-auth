@@ -10,6 +10,7 @@ use sha256::digest;
 
 type SecretKey = String;
 type RequestKey = String;
+type ContactStringified = String;
 
 /// Price per 1 byte of storage from mainnet config after `0.18` release and protocol version `42`.
 /// It's 10 times lower than the genesis price.
@@ -26,14 +27,17 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 pub struct Contract {
     master_account_id: AccountId,
     accounts: UnorderedMap<AccountId, Vec<Contact>>,
+    accounts_for_contacts: UnorderedMap<ContactStringified, AccountId>,
     requests: UnorderedMap<RequestKey, Request>,
     storage_deposits: LookupMap<AccountId, Balance>,
+    version: u16,
 }
 
 /// Helper structure to for keys of the persistent collections.
 #[derive(BorshSerialize)]
 pub enum StorageKey {
     Accounts,
+    AccountsForContacts,
     Requests,
     StorageDeposits,
 }
@@ -53,6 +57,7 @@ pub enum ContactCategories {
 pub struct Contact {
     pub category: ContactCategories,
     pub value: String,
+    pub account_id: Option<u64>,
 }
 
 #[derive(Clone, BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq)]
@@ -62,7 +67,6 @@ pub struct Request {
     pub account_id: AccountId,
 }
 
-
 #[near_bindgen]
 impl Contract {
     #[init]
@@ -70,8 +74,10 @@ impl Contract {
         Self {
             master_account_id: master_account_id.into(),
             accounts: UnorderedMap::new(StorageKey::Accounts.try_to_vec().unwrap()),
+            accounts_for_contacts: UnorderedMap::new(StorageKey::AccountsForContacts.try_to_vec().unwrap()),
             requests: UnorderedMap::new(StorageKey::Requests.try_to_vec().unwrap()),
             storage_deposits: LookupMap::new(StorageKey::StorageDeposits.try_to_vec().unwrap()),
+            version: 0,
         }
     }
 
@@ -108,15 +114,23 @@ impl Contract {
     }
 
     fn prepare_contact(contact: Contact) -> Contact {
+        assert!(!contact.value.is_empty(), "Contact value is empty");
+
+        if contact.category == ContactCategories::Telegram {
+            assert!(contact.account_id != None, "Telegram account_id is missing");
+        }
+
         if contact.category == ContactCategories::Telegram && contact.value.chars().nth(0).unwrap() == '@' {
             Contact {
                 category: ContactCategories::Telegram,
-                value: contact.value[1..contact.value.len()].trim().to_string()
+                value: contact.value[1..contact.value.len()].trim().to_string().to_lowercase(),
+                account_id: contact.account_id,
             }
         } else {
             Contact {
                 category: contact.category,
-                value: contact.value.trim().to_string()
+                value: contact.value.trim().to_string().to_lowercase(),
+                account_id: contact.account_id,
             }
         }
     }
@@ -129,9 +143,11 @@ impl Contract {
 
         contact = Contract::prepare_contact(contact);
 
-        let contact_owner = Contract::get_owners(self, contact.clone());
+        //let contact_owner = Contract::get_owners(self, contact.clone());
+        // assert!(contact_owner.is_empty(), "Contact already registered");
 
-        assert!(contact_owner.is_empty(), "Contact already registered");
+        let contact_owner = self.get_account_for_contact(contact.clone());
+        assert!(contact_owner.is_none(), "Contact already registered");
 
         match self.get_request(request_key.clone()) {
             Some(request) => {
@@ -163,6 +179,33 @@ impl Contract {
         digest(key)
     }
 
+    pub(crate) fn compare_contacts(contact1: Contact, contact2: Contact) -> bool {
+        if contact1.category == ContactCategories::Telegram && contact2.category == ContactCategories::Telegram {
+            return contact1.account_id == contact2.account_id;
+        } else {
+            return contact1.category == contact2.category && contact1.value == contact2.value;
+        }
+    }
+
+    // TODO only 2 chars of category??
+    fn get_contact_stringified(contact: Contact) -> String {
+        if contact.category == ContactCategories::Telegram {
+            format!("{:?}:{:?}", contact.category, Some(contact.account_id))
+        } else {
+            format!("{:?}:{}", contact.category, contact.value)
+        }
+    }
+
+    pub(crate) fn insert_accounts_for_contact(&mut self, account_id: AccountId, contact: Contact) {
+        let contact_stringified = Contract::get_contact_stringified(contact);
+        self.accounts_for_contacts.insert(&contact_stringified, &account_id);
+    }
+
+    pub(crate) fn remove_accounts_for_contact(&mut self, contact: Contact) {
+        let contact_stringified = Contract::get_contact_stringified(contact);
+        self.accounts_for_contacts.remove(&contact_stringified);
+    }
+
     pub fn confirm_auth(&mut self, key: SecretKey) {
         let account_id = env::predecessor_account_id();
         let request_key = Contract::get_sha256(key);
@@ -182,7 +225,10 @@ impl Contract {
                         let initial_storage_usage = env::storage_usage();
 
                         let mut contacts = self.get_contacts(account_id.clone()).unwrap_or(vec![]);
-                        contacts.push(requested_contact);
+                        contacts.push(requested_contact.clone());
+
+                        self.insert_accounts_for_contact(account_id.clone(), requested_contact);
+
                         self.accounts.insert(&account_id, &contacts);
 
                         // update storage
@@ -252,6 +298,18 @@ impl Contract {
         }
     }
 
+    pub fn get_account_for_contact(&self, contact: Contact) -> Option<AccountId> {
+        let contact_stringified = Contract::get_contact_stringified(contact);
+        self.get_account_for_contact_stringified(contact_stringified)
+    }
+
+    pub fn get_account_for_contact_stringified(&self, contact_stringified: ContactStringified) -> Option<AccountId> {
+        match self.accounts_for_contacts.get(&contact_stringified) {
+            Some(account_id) => Some(account_id),
+            None => None
+        }
+    }
+
     pub fn get_contacts_by_type(&self, account_id: AccountId, category: ContactCategories) -> Option<Vec<String>> {
         match self.accounts.get(&account_id) {
             Some(contacts) =>
@@ -276,21 +334,38 @@ impl Contract {
     pub fn send(&mut self, contact: Contact) -> Promise {
         let tokens: Balance = near_sdk::env::attached_deposit();
 
+
+        /*
         let owners = self.get_owners(contact);
         let owners_quantity = owners.len();
         assert!(owners_quantity > 0, "Contact not found");
         assert!(owners_quantity == 1, "Illegal contact owners quantity");
-
         let recipient = owners.get(0).unwrap().to_string();
-        env::log(format!("Tokens sent to @{}", recipient).as_bytes());
+        */
 
-        Promise::new(recipient).transfer(tokens)
+        let recipient = self.get_account_for_contact(contact);
+        assert!(!recipient.is_none(), "Contact not found");
+
+        let recipient_account_id = recipient.unwrap();
+
+        env::log(format!("Tokens sent to @{}", recipient_account_id.clone()).as_bytes());
+
+        Promise::new(recipient_account_id).transfer(tokens)
     }
 
+    pub fn get_all_accounts_for_contacts(&self, from_index: u64, limit: u64) -> HashMap<ContactStringified, AccountId> {
+        let keys = self.accounts_for_contacts.keys_as_vector();
+
+        (from_index..std::cmp::min(from_index + limit, keys.len()))
+            .map(|index| {
+                let contact_stringified = keys.get(index).unwrap();
+                let account_id = self.get_account_for_contact_stringified(contact_stringified.clone()).unwrap();
+                (contact_stringified, account_id)
+            })
+            .collect()
+    }
 
     pub fn get_all_contacts(&self, from_index: u64, limit: u64) -> HashMap<AccountId, Vec<Contact>> {
-        assert!(limit <= 100, "Abort. Limit > 100");
-
         let keys = self.accounts.keys_as_vector();
 
         (from_index..std::cmp::min(from_index + limit, keys.len()))
@@ -318,18 +393,56 @@ impl Contract {
             .collect()
     }
 
-    pub fn get_owners(&self, contact: Contact) -> Vec<String> {
+
+    pub fn get_owners(&self, _contact: Contact) -> Vec<String> {
+        panic!("Deprecated. Use `get_account_for_contact` instead");
+        /*
+        let keys = self.accounts.keys_as_vector();
+
+        if contact.category == ContactCategories::Telegram {
+            (0..keys.len())
+                .filter(|index| self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact))
+                .map(|index| keys.get(index).unwrap())
+                .collect()
+        } else {
+            (0..keys.len())
+                .filter(|index| self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact))
+                .map(|index| keys.get(index).unwrap())
+                .collect()
+        }
+        */
+
+        /*
         let keys = self.accounts.keys_as_vector();
 
         (0..keys.len())
-            .filter(|index| self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact))
+            .filter(|index| {
+                //self.get_contacts(keys.get(*index).unwrap()).unwrap().contains(&contact)
+                let contacts = self.get_contacts(keys.get(*index).unwrap());
+
+                if contact.category == ContactCategories::Telegram
+                {
+                    let telegram_contacts = contacts.filter(|telegram_contact| {
+                        telegram_contact.account_id == contact.account_id
+                    });
+
+                    telegram_contacts.len() > 0
+                } else {
+                    contacts.unwrap().contains(&contact)
+                }
+            })
             .map(|index| keys.get(index).unwrap())
             .collect()
+            */
     }
 
     pub fn is_owner(&self, account_id: AccountId, contact: Contact) -> bool {
         match self.accounts.get(&account_id) {
-            Some(contacts) => contacts.contains(&contact),
+            Some(contacts) => //contacts.contains(&contact),
+                {
+                    contacts.into_iter()
+                        .any(|_contact| Contract::compare_contacts(_contact.clone(), contact.clone()))
+                }
             None => false
         }
     }
@@ -347,9 +460,11 @@ impl Contract {
 
                     let filtered_contacts: Vec<Contact> = contacts
                         .into_iter()
-                        .filter(|_contact| !(_contact.category == contact.category && _contact.value == contact.value))
+                        .filter(|_contact| !Contract::compare_contacts(_contact.clone(), contact.clone()))
                         .collect();
                     self.accounts.insert(&account_id, &filtered_contacts);
+
+                    self.remove_accounts_for_contact(contact);
 
                     let tokens_per_entry_in_bytes = initial_storage_usage - env::storage_usage();
                     let tokens_per_entry_storage_price: Balance = Balance::from(tokens_per_entry_in_bytes) * STORAGE_PRICE_PER_BYTE;
@@ -364,19 +479,35 @@ impl Contract {
         }
     }
 
-    pub fn remove_all(&mut self) {
+    pub fn remove_all(&mut self) -> bool {
         let account_id = env::predecessor_account_id();
 
-        let initial_storage_usage = env::storage_usage();
+        match self.accounts.get(&account_id) {
+            Some(contacts) =>
+                {
+                    let initial_storage_usage = env::storage_usage();
 
-        self.accounts.insert(&account_id, &vec![]);
+                    for _contact in contacts.iter() {
+                        self.remove_accounts_for_contact(_contact.clone());
+                    }
 
-        let tokens_per_entry_in_bytes = initial_storage_usage - env::storage_usage();
-        let tokens_per_entry_storage_price: Balance = Balance::from(tokens_per_entry_in_bytes) * STORAGE_PRICE_PER_BYTE;
-        let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
-        let balance: Balance = storage_paid.0 + tokens_per_entry_storage_price;
-        self.storage_deposits.insert(&account_id, &balance);
-        env::log(format!("@{} unlocked {} yNEAR from storage", account_id, tokens_per_entry_storage_price).as_bytes());
+                    /*contacts
+                        .iter()
+                        .map(|_contact| self.remove_accounts_for_contact(_contact.clone()));*/
+
+                    self.accounts.insert(&account_id, &vec![]);
+
+                    let tokens_per_entry_in_bytes = initial_storage_usage - env::storage_usage();
+                    let tokens_per_entry_storage_price: Balance = Balance::from(tokens_per_entry_in_bytes) * STORAGE_PRICE_PER_BYTE;
+                    let storage_paid = Contract::storage_paid(self, ValidAccountId::try_from(account_id.clone()).unwrap());
+                    let balance: Balance = storage_paid.0 + tokens_per_entry_storage_price;
+                    self.storage_deposits.insert(&account_id, &balance);
+                    env::log(format!("@{} unlocked {} yNEAR from storage", account_id, tokens_per_entry_storage_price).as_bytes());
+
+                    true
+                }
+            None => false
+        }
     }
 
     #[payable]
@@ -412,6 +543,46 @@ impl Contract {
     pub fn storage_paid(&self, account_id: ValidAccountId) -> U128 {
         U128(self.storage_deposits.get(account_id.as_ref()).unwrap_or(0))
     }
+
+
+    #[init(ignore_state)]
+    pub fn migrate_state_1() -> Self {
+        let migration_version: u16 = 1;
+        assert_eq!(env::predecessor_account_id(), env::current_account_id(), "Private function");
+
+        #[derive(BorshDeserialize)]
+        struct OldContract {
+            master_account_id: AccountId,
+            accounts: UnorderedMap<AccountId, Vec<Contact>>,
+            requests: UnorderedMap<RequestKey, Request>,
+            storage_deposits: LookupMap<AccountId, Balance>,
+        }
+
+        let old_contract: OldContract = env::state_read().expect("Old state doesn't exist");
+
+        let mut new_accounts = UnorderedMap::new(StorageKey::Accounts.try_to_vec().unwrap());
+
+        // reformat contacts for migration
+        new_accounts.insert(&"1".to_string(), &get_telegram_contact("account_id".to_string(), Some(123)));
+        new_accounts.insert(&"2".to_string(), &get_telegram_contact("account_id".to_string(), Some(456)));
+        new_accounts.insert(&"3".to_string(), &get_telegram_contact("account_id".to_string(), None));
+
+        let new_requests = UnorderedMap::new(StorageKey::Requests.try_to_vec().unwrap());
+        let new_accounts_for_contacts = UnorderedMap::new(StorageKey::AccountsForContacts.try_to_vec().unwrap());
+
+        Self {
+            master_account_id: old_contract.master_account_id,
+            accounts: new_accounts,
+            accounts_for_contacts: new_accounts_for_contacts,
+            requests: new_requests,
+            storage_deposits: old_contract.storage_deposits,
+            version: migration_version,
+        }
+    }
+
+    pub fn get_version(&self) -> u16 {
+        self.version
+    }
 }
 
 /* UTILS */
@@ -422,6 +593,20 @@ pub(crate) fn assert_one_yocto() {
         "Requires attached deposit of exactly 1 yoctoNEAR",
     )
 }
+
+// for migration
+pub(crate) fn get_telegram_contact(value: String, account_id: Option<u64>) -> Vec<Contact> {
+    let contact = Contact {
+        category: ContactCategories::Telegram,
+        value,
+        account_id,
+    };
+
+    let mut res = Vec::new();
+    res.push(contact);
+    res
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -452,14 +637,16 @@ mod tests {
     fn alice_contact() -> Contact {
         Contact {
             category: ContactCategories::Telegram,
-            value: "123".to_string(),
+            value: "account_123".to_string(),
+            account_id: 1,
         }
     }
 
     fn bob_contact() -> Contact {
         Contact {
             category: ContactCategories::Telegram,
-            value: "456".to_string(),
+            value: "account_456".to_string(),
+            account_id: 2,
         }
     }
 
@@ -535,7 +722,7 @@ mod tests {
 
         let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
@@ -585,7 +772,7 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
@@ -603,7 +790,7 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
@@ -619,12 +806,12 @@ mod tests {
         contract.storage_deposit(Some(alice_valid_account()));
         let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 0, false);
         testing_env!(context.clone());
 
@@ -637,7 +824,7 @@ mod tests {
         assert!(storage_paid_before == storage_paid_after + WHITELIST_FEE,
                 "Wrong storage deposit for remove_request {} / {}", storage_paid_before, storage_paid_after);
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
@@ -655,12 +842,12 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
@@ -680,12 +867,12 @@ mod tests {
         contract.storage_deposit(Some(alice_valid_account()));
         let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
@@ -711,12 +898,12 @@ mod tests {
         contract.storage_deposit(Some(alice_valid_account()));
         let storage_paid_before = contract.storage_paid(alice_valid_account()).0;
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
@@ -747,12 +934,12 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
@@ -771,18 +958,18 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
         contract.start_auth(alice_request_key(), alice_contact());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(bob_account(), 1, false);
         testing_env!(context.clone());
 
@@ -799,30 +986,30 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
         contract.start_auth(alice_request_key(), alice_contact());
         contract.confirm_auth(alice_secret_key());
 
-        // switch to bob
+// switch to bob
 
         let context = get_context(bob_account(), ntoy(100), false);
         testing_env!(context.clone());
         contract.storage_deposit(Some(bob_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(bob_valid_account(), bob_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
@@ -839,12 +1026,12 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
@@ -868,19 +1055,19 @@ mod tests {
 
         contract.storage_deposit(Some(alice_valid_account()));
 
-        // switch to a context with master_account
+// switch to a context with master_account
         let context = get_context(master_account(), 0, false);
         testing_env!(context.clone());
         contract.whitelist_key(alice_valid_account(), alice_request_key());
 
-        // switch back to a context with user
+// switch back to a context with user
         let context = get_context(alice_account(), 1, false);
         testing_env!(context.clone());
 
         contract.start_auth(alice_request_key(), alice_contact());
         contract.confirm_auth(alice_secret_key());
 
-        // send from bob
+// send from bob
 
         let context = get_context(bob_account(), ntoy(75), false);
         testing_env!(context.clone());
