@@ -60,6 +60,13 @@ pub struct Contact {
     pub account_id: Option<u64>,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq, Clone)]
+#[serde(crate = "near_sdk::serde")]
+pub struct Contact_v1 {
+    pub category: ContactCategories,
+    pub value: String,
+}
+
 #[derive(Clone, BorshDeserialize, BorshSerialize, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(crate = "near_sdk::serde")]
 pub struct Request {
@@ -498,7 +505,7 @@ impl Contract {
         #[derive(BorshDeserialize)]
         struct OldContract {
             master_account_id: AccountId,
-            accounts: UnorderedMap<AccountId, Vec<Contact>>,
+            accounts: UnorderedMap<AccountId, Vec<Contact_v1>>,
             requests: UnorderedMap<RequestKey, Request>,
             storage_deposits: LookupMap<AccountId, Balance>,
         }
