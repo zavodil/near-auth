@@ -40,6 +40,8 @@ pub enum StorageKey {
     AccountsForContacts,
     Requests,
     StorageDeposits,
+    Accounts2, // used after migration_1
+    Requests2, // used after migration_1
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Eq, PartialEq, Debug, Serialize, Deserialize, Clone)]
@@ -244,7 +246,7 @@ impl Contract {
     // TODO only first N chars of category to reduce storage?
     fn get_contact_stringified(contact: Contact) -> String {
         if contact.category == ContactCategories::Telegram {
-            format!("{:?}:{:?}", contact.category, Some(contact.account_id))
+            format!("{:?}:{:?}", contact.category, contact.account_id.unwrap())
         } else {
             format!("{:?}:{}", contact.category, contact.value)
         }
@@ -512,15 +514,15 @@ impl Contract {
 
         let old_contract: OldContract = env::state_read().expect("Old state doesn't exist");
 
-        let mut new_accounts = UnorderedMap::new(StorageKey::Accounts.try_to_vec().unwrap());
+        let mut new_accounts = UnorderedMap::new(StorageKey::Accounts2.try_to_vec().unwrap());
 
-        // reformat contacts for migration
-        new_accounts.insert(&"1".to_string(), &get_telegram_contact("account_id".to_string(), Some(123)));
-        new_accounts.insert(&"2".to_string(), &get_telegram_contact("account_id".to_string(), Some(456)));
-        new_accounts.insert(&"3".to_string(), &get_telegram_contact("account_id".to_string(), None));
+        let new_requests = UnorderedMap::new(StorageKey::Requests2.try_to_vec().unwrap());
+        let mut new_accounts_for_contacts = UnorderedMap::new(StorageKey::AccountsForContacts.try_to_vec().unwrap());
 
-        let new_requests = UnorderedMap::new(StorageKey::Requests.try_to_vec().unwrap());
-        let new_accounts_for_contacts = UnorderedMap::new(StorageKey::AccountsForContacts.try_to_vec().unwrap());
+        let data1_account = "example.near".to_string();
+        let data1_contact = get_telegram_contact("handler".to_string(), Some(123));
+        new_accounts.insert(&data1_account.clone(), &vec![data1_contact.clone()]);
+        new_accounts_for_contacts.insert(&Contract::get_contact_stringified(data1_contact), &data1_account);
 
         Self {
             master_account_id: old_contract.master_account_id,
@@ -547,14 +549,12 @@ pub(crate) fn assert_one_yocto() {
 }
 
 // for migration
-pub(crate) fn get_telegram_contact(value: String, account_id: Option<u64>) -> Vec<Contact> {
-    let contact = Contact {
+pub(crate) fn get_telegram_contact(value: String, account_id: Option<u64>) -> Contact {
+    Contact {
         category: ContactCategories::Telegram,
         value,
         account_id,
-    };
-
-    vec![contact]
+    }
 }
 
 

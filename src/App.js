@@ -72,6 +72,9 @@ export default function App() {
                 <div className="complete" dangerouslySetInnerHTML={{__html: complete}}/>)
     };
 
+    //const FULL_GAS = 300000000000000;
+    const FULL_GAS = 200000000000000;
+
     const WhiteListedKeyRemove = () => {
         return (
             !whiteListedKeyRemove ? null :
@@ -80,9 +83,8 @@ export default function App() {
                         className="abort-previous-button"
                         onClick={async event => {
                             event.preventDefault()
-                            const gas = 300000000000000;
                             try {
-                                await window.contract.remove_request({}, gas);
+                                await window.contract.remove_request({}, FULL_GAS);
                                 setWhiteListedKeyRemove(false);
                             } catch (e) {
                                 alert(
@@ -149,7 +151,7 @@ export default function App() {
                                     await window.contract.start_auth({
                                         request_key: data.request_key,
                                         contact: {category: contactType, value: data.contact},
-                                    }, 300000000000000, 1)
+                                    }, FULL_GAS, 1)
                                 } catch (e) {
                                     ContractCallAlert();
                                     throw e
@@ -345,10 +347,9 @@ export default function App() {
                             if (has_request_key && request_key) {
                                 setComplete("Auth request found. Processing... ");
 
-                                const gas = 300000000000000;
                                 await window.contract.confirm_auth({
                                         key: query.key,
-                                    }, gas
+                                    }, FULL_GAS
                                 )
                                     .then(data => {
                                         if (data.status) {
@@ -708,15 +709,29 @@ export default function App() {
                                             setWhiteListedKeyRemove(true);
                                     } else {
                                         setWarning("");
+                                        console.log("contact");
+                                        console.log(contact);
                                         data.contact = contact.value;
                                         data.contact_type = contactType.toLowerCase()
                                         window.localStorage.setItem('request', data ? JSON.stringify(data) : "[]");
 
+                                        let contactMetadata =
+                                            (data.contact_type === "telegram")
+                                                ? {
+                                                    category: contactType,
+                                                    value: contact.value,
+                                                    account_id: Number(data.value)
+                                                }
+                                                : {
+                                                    category: contactType,
+                                                    value: contact.value
+                                                };
+
                                         try {
                                             await window.contract.start_auth({
                                                 request_key: data.request_key,
-                                                contact: {category: contactType, value: contact.value},
-                                            }, 300000000000000, 1)
+                                                contact: contactMetadata,
+                                            }, FULL_GAS, 1)
                                         } catch (e) {
                                             ContractCallAlert();
                                             throw e
@@ -861,23 +876,24 @@ export default function App() {
                                     onClick={async event => {
                                         event.preventDefault()
                                         try {
-                                            const owners = await window.contract.get_owners({
-                                                "contact":
-                                                    {"category": sendFormType, "value": sendFormContact}
-                                            });
+                                            let owner = "";
+                                            if(sendFormType.toLowerCase() !== "telegram") {
+                                                owner = await window.contract.get_account_for_contact({
+                                                    "contact":
+                                                        {"category": sendFormType, "value": sendFormContact}
+                                                });
+                                            }
 
-                                            console.log(sendFormContact)
-                                            console.log(owners);
+                                            console.log(sendFormContact + " " + owner);
 
-                                            if (owners.length > 1) {
-                                                setSendFormResult("Too many users associated with this social contact. Abort")
-                                            } else if (owners.length === 1) {
-
+                                            if (owner !== "") {
+                                                setSendFormResult("Contact was not found. Abort")
+                                            } else {
                                                 try {
                                                     await window.contract.send({
                                                         "contact":
                                                             {"category": sendFormType, "value": sendFormContact}
-                                                    }, 300000000000000, ConvertToYoctoNear(sendFormNearAmount))
+                                                    }, FULL_GAS, ConvertToYoctoNear(sendFormNearAmount))
 
                                                     setShowNotification({method: "call", data: "send"});
                                                     setTimeout(() => {
@@ -887,10 +903,6 @@ export default function App() {
                                                     ContractCallAlert();
                                                     throw e
                                                 }
-
-
-                                            } else {
-                                                setSendFormResult("Contact was not found")
                                             }
 
 
